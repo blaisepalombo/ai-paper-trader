@@ -1,6 +1,7 @@
 .env
 trade_log.csv
 daily_report.txt
+auto_report_state.json
 __pycache__/
 *.pyc
 .venv/
