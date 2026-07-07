@@ -267,8 +267,6 @@ def status_fingerprint(clock, positions, open_orders, recent_orders=None):
         (
             position.get("symbol"),
             position.get("qty"),
-            position.get("market_value"),
-            position.get("unrealized_pl"),
         )
         for position in positions
     ]
@@ -288,7 +286,6 @@ def status_fingerprint(clock, positions, open_orders, recent_orders=None):
             order.get("symbol"),
             order.get("status"),
             order.get("filled_qty"),
-            order.get("filled_avg_price"),
         ))
     return repr((clock.get("is_open"), position_bits, order_bits, recent_order_bits))
 
@@ -398,7 +395,7 @@ def build_change_alert(previous, current, account, clock, positions, open_orders
         lines.append(f"Position no longer open: {symbol}")
 
     if not lines:
-        return build_short_update(account, clock, positions, open_orders)
+        return None
 
     lines.append("")
     lines.append(build_short_update(account, clock, positions, open_orders))
@@ -700,11 +697,14 @@ async def auto_report_loop(client):
             current_state = current_auto_state(clock, positions, open_orders, recent_orders)
             fingerprint = status_fingerprint(clock, positions, open_orders, recent_orders)
 
-            if fingerprint != last_auto_fingerprint:
+            state_changed = fingerprint != last_auto_fingerprint
+            previous_snapshot = saved_state.get("snapshot", {})
+
+            if state_changed:
                 last_auto_fingerprint = fingerprint
-                previous_snapshot = saved_state.get("snapshot", {})
                 alert = build_change_alert(previous_snapshot, current_state, account, clock, positions, open_orders, recent_orders)
-                await send_codeblock(channel, alert)
+                if alert:
+                    await send_codeblock(channel, alert)
 
                 opened_now = previous_snapshot.get("market_open") is False and current_state.get("market_open") is True
                 if opened_now and auto_analyze_at_open_enabled():
@@ -714,18 +714,18 @@ async def auto_report_loop(client):
                         analysis = f"Auto-analysis failed:\n{error}"
                     await send_codeblock(channel, analysis)
 
-                risk_alert = build_risk_alerts(positions, saved_state)
-                if risk_alert:
-                    await send_codeblock(channel, risk_alert)
-
                 closed_now = previous_snapshot.get("market_open") is True and current_state.get("market_open") is False
                 already_sent_today = saved_state.get("last_daily_recap_date") == utc_today()
                 if closed_now and daily_recap_enabled() and not already_sent_today:
                     await send_codeblock(channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
                     saved_state["last_daily_recap_date"] = utc_today()
 
-                saved_state["snapshot"] = current_state
-                save_auto_state(saved_state)
+            risk_alert = build_risk_alerts(positions, saved_state)
+            if risk_alert:
+                await send_codeblock(channel, risk_alert)
+
+            saved_state["snapshot"] = current_state
+            save_auto_state(saved_state)
         except Exception as error:
             print(f"Auto report failed: {error}")
 
