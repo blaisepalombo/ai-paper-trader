@@ -1,0 +1,7 @@
+.env
+trade_log.csv
+daily_report.txt
+__pycache__/
+*.pyc
+.venv/
+venv/

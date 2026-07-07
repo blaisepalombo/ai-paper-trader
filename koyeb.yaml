@@ -1,0 +1,23 @@
+name: ai-paper-trader
+services:
+  - name: discord-bot
+    type: web
+    git:
+      branch: main
+    instance_type: free
+    ports:
+      - port: 8000
+        protocol: http
+    env:
+      - key: APCA_API_BASE_URL
+        value: https://paper-api.alpaca.markets/v2
+      - key: APCA_DATA_BASE_URL
+        value: https://data.alpaca.markets/v2
+      - key: APCA_API_KEY_ID
+        scope: secret
+      - key: APCA_API_SECRET_KEY
+        scope: secret
+      - key: DISCORD_BOT_TOKEN
+        scope: secret
+      - key: DISCORD_ALLOWED_USER_ID
+        scope: secret
