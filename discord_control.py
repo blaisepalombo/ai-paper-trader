@@ -193,13 +193,13 @@ async def handle_channelid(message):
     await message.channel.send(f"This channel ID is `{message.channel.id}`")
 
 
-async def handle_autotest(message):
+async def handle_autotest(message, client):
     channel_id = report_channel_id()
     if channel_id is None:
         await message.channel.send("No `DISCORD_REPORT_CHANNEL_ID` is set yet. Run `!channelid`, put that number in `.env`, then restart the bot.")
         return
 
-    channel = message.client.get_channel(channel_id)
+    channel = client.get_channel(channel_id)
     if channel is None:
         await message.channel.send("I could not find the report channel. Check `DISCORD_REPORT_CHANNEL_ID` and restart the bot.")
         return
@@ -420,7 +420,7 @@ def make_client(allowed_user_id):
         elif command == "!cancel":
             await handle_cancel(message)
         elif command == "!autotest":
-            await handle_autotest(message)
+            await handle_autotest(message, client)
         else:
             await message.channel.send("Unknown command. Try `!help`.")
 
