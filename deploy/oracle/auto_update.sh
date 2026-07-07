@@ -65,11 +65,22 @@ fi
 log "Updating ${local_sha} -> ${remote_sha}"
 git_as_app_user reset --hard "origin/${BRANCH}" >/dev/null
 
+rollback() {
+  log "Update failed. Rolling back to ${local_sha}."
+  git_as_app_user reset --hard "${local_sha}" >/dev/null
+}
+
 log "Installing Python requirements..."
-run_as_app_user "'${PYTHON_BIN}' -m pip install -r requirements.txt >/dev/null"
+if ! run_as_app_user "'${PYTHON_BIN}' -m pip install -r requirements.txt >/dev/null"; then
+  rollback
+  exit 1
+fi
 
 log "Checking Python files..."
-run_as_app_user "'${PYTHON_BIN}' -m py_compile paper_bot.py discord_control.py"
+if ! run_as_app_user "'${PYTHON_BIN}' -m py_compile paper_bot.py discord_control.py"; then
+  rollback
+  exit 1
+fi
 
 log "Restarting ${SERVICE_NAME}..."
 restart_service
