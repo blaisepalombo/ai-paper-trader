@@ -72,6 +72,26 @@ def daily_recap_enabled():
     return os.environ.get("DAILY_RECAP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def auto_analyze_at_open_enabled():
+    return os.environ.get("AUTO_ANALYZE_AT_OPEN", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def stop_loss_percent():
+    raw = os.environ.get("STOP_LOSS_PCT", "3").strip()
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return 3.0
+
+
+def take_profit_percent():
+    raw = os.environ.get("TAKE_PROFIT_PCT", "5").strip()
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return 5.0
+
+
 def report_channel_id():
     value = os.environ.get("DISCORD_REPORT_CHANNEL_ID", "").strip()
     if not value or value == "put_your_discord_report_channel_id_here":
@@ -137,6 +157,9 @@ def build_short_update(account, clock, positions, open_orders):
         f"Open positions: {len(positions)}",
         f"Open orders: {len(open_orders)}",
     ]
+    summary = portfolio_summary(positions)
+    lines.append(f"Estimated experiment value: {paper_bot.money(summary['estimated_value'])}")
+    lines.append(f"Open P/L: {paper_bot.money(summary['open_pl'])}")
 
     for position in positions:
         symbol = position.get("symbol", "?")
@@ -160,6 +183,36 @@ def build_short_update(account, clock, positions, open_orders):
     return "\n".join(lines)
 
 
+def portfolio_summary(positions):
+    open_value = 0.0
+    open_pl = 0.0
+    for position in positions:
+        open_value += float(position.get("market_value") or 0)
+        open_pl += float(position.get("unrealized_pl") or 0)
+    return {
+        "virtual_capital": paper_bot.VIRTUAL_CAPITAL,
+        "open_value": open_value,
+        "open_pl": open_pl,
+        "estimated_value": paper_bot.VIRTUAL_CAPITAL + open_pl,
+    }
+
+
+def build_portfolio_summary(positions):
+    summary = portfolio_summary(positions)
+    exposure_pct = 0.0
+    if paper_bot.VIRTUAL_CAPITAL:
+        exposure_pct = (summary["open_value"] / paper_bot.VIRTUAL_CAPITAL) * 100
+    lines = [
+        "AI Paper Trader Portfolio",
+        f"Virtual starting capital: {paper_bot.money(summary['virtual_capital'])}",
+        f"Open market value: {paper_bot.money(summary['open_value'])}",
+        f"Open unrealized P/L: {paper_bot.money(summary['open_pl'])}",
+        f"Estimated experiment value: {paper_bot.money(summary['estimated_value'])}",
+        f"Open exposure: {paper_bot.percent(exposure_pct)}",
+    ]
+    return "\n".join(lines)
+
+
 def build_daily_recap(account, clock, positions, open_orders, recent_orders):
     lines = [
         "AI Paper Trader Daily Recap",
@@ -168,6 +221,7 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
         f"Open positions: {len(positions)}",
         f"Open orders: {len(open_orders)}",
     ]
+    lines.append(build_portfolio_summary(positions))
 
     total_value = 0.0
     total_pl = 0.0
@@ -247,6 +301,57 @@ def order_state(order):
         "filled_qty": order.get("filled_qty"),
         "filled_avg_price": order.get("filled_avg_price"),
     }
+
+
+def risk_alert_keys(positions):
+    keys = set()
+    sl_pct = stop_loss_percent()
+    tp_pct = take_profit_percent()
+    for position in positions:
+        symbol = position.get("symbol")
+        avg = float(position.get("avg_entry_price") or 0)
+        current = float(position.get("current_price") or 0)
+        if not symbol or avg <= 0 or current <= 0:
+            continue
+        if current <= avg * (1 - sl_pct / 100):
+            keys.add(f"{symbol}:stop")
+        if current >= avg * (1 + tp_pct / 100):
+            keys.add(f"{symbol}:target")
+    return keys
+
+
+def build_risk_alerts(positions, saved_state):
+    previous_keys = set(saved_state.get("risk_alert_keys", []))
+    current_keys = risk_alert_keys(positions)
+    new_keys = current_keys - previous_keys
+    saved_state["risk_alert_keys"] = sorted(current_keys)
+
+    if not new_keys:
+        return None
+
+    sl_pct = stop_loss_percent()
+    tp_pct = take_profit_percent()
+    lines = ["AI Paper Trader Risk Alert"]
+    for position in positions:
+        symbol = position.get("symbol")
+        avg = float(position.get("avg_entry_price") or 0)
+        current = float(position.get("current_price") or 0)
+        if not symbol or avg <= 0 or current <= 0:
+            continue
+        stop_price = avg * (1 - sl_pct / 100)
+        target_price = avg * (1 + tp_pct / 100)
+        if f"{symbol}:stop" in new_keys:
+            lines.append(
+                f"- {symbol} is at or below stop alert: current {paper_bot.money(current)}, "
+                f"stop area {paper_bot.money(stop_price)} ({sl_pct:g}% below entry)"
+            )
+        if f"{symbol}:target" in new_keys:
+            lines.append(
+                f"- {symbol} is at or above take-profit alert: current {paper_bot.money(current)}, "
+                f"target area {paper_bot.money(target_price)} ({tp_pct:g}% above entry)"
+            )
+    lines.append("Alert only. The bot did not sell or place a new order.")
+    return "\n".join(lines)
 
 
 def current_auto_state(clock, positions, open_orders, recent_orders):
@@ -331,6 +436,41 @@ async def handle_brief(message):
     await send_codeblock(message.channel, build_short_update(account, clock, positions, open_orders))
 
 
+async def handle_pnl(message):
+    positions = paper_bot.get_positions()
+    await send_codeblock(message.channel, build_portfolio_summary(positions))
+
+
+async def handle_journal(message):
+    rows = paper_bot.read_trade_log(limit=10)
+    recent_orders = paper_bot.get_orders("all", 10)
+
+    lines = ["AI Paper Trader Journal"]
+    if rows:
+        lines.append("")
+        lines.append("Local trade log:")
+        for row in rows:
+            timestamp = row.get("timestamp_utc", "?")
+            symbol = row.get("symbol", "?")
+            dollars = row.get("dollars", "?")
+            status = row.get("status", "?")
+            lines.append(f"- {timestamp}: {symbol} ${dollars}, status {status}")
+    else:
+        lines.append("")
+        lines.append("Local trade log: none yet")
+
+    if recent_orders:
+        lines.append("")
+        lines.append("Recent Alpaca orders:")
+        for order in recent_orders[:10]:
+            lines.append(f"- {paper_bot.order_label(order)}")
+    else:
+        lines.append("")
+        lines.append("Recent Alpaca orders: none")
+
+    await send_codeblock(message.channel, "\n".join(lines))
+
+
 async def handle_recap(message):
     account = paper_bot.get_account()
     clock = paper_bot.get_clock()
@@ -364,6 +504,46 @@ async def handle_autotest(message, client):
     if daily_recap_enabled():
         await send_codeblock(channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
     await message.channel.send("Sent a test auto-report.")
+
+
+async def handle_cancelorder(message, args):
+    open_orders = paper_bot.get_orders("open")
+    if not open_orders:
+        await message.channel.send("No open Alpaca paper orders to cancel.")
+        return
+
+    if args and args[0].lower() != "all":
+        requested = args[0]
+        matching = [
+            order
+            for order in open_orders
+            if str(order.get("id", "")).startswith(requested) or order.get("symbol", "").upper() == requested.upper()
+        ]
+        if not matching:
+            await message.channel.send("No matching open order. Use `!status` to see open orders, or `!cancelorder all`.")
+            return
+        target_orders = matching[:1]
+    elif args and args[0].lower() == "all":
+        target_orders = open_orders
+    else:
+        target_orders = open_orders[:1]
+
+    lines = ["Cancel order request:"]
+    for order in target_orders:
+        order_id = order.get("id")
+        symbol = order.get("symbol", "?")
+        if not order_id:
+            lines.append(f"- {symbol}: missing order id, skipped")
+            continue
+        try:
+            paper_bot.cancel_order(order_id)
+            paper_bot.log_trade(symbol, 0, "canceled", f"cancel requested for order_id={order_id}")
+            lines.append(f"- Cancel requested for {symbol}: {order_id}")
+        except RuntimeError as error:
+            lines.append(f"- Could not cancel {symbol}: {error}")
+
+    lines.append("This cancels paper orders only. It does not sell open positions.")
+    await send_codeblock(message.channel, "\n".join(lines))
 
 
 async def handle_trade(message, args):
@@ -468,12 +648,16 @@ def help_text():
 !channelid - show this channel's ID for auto reports
 !status - show full bot report
 !brief - show short bot report
+!pnl - show experiment P/L summary
+!journal - show local trade log and recent Alpaca orders
 !recap - show daily recap style report
 !suggest - show next recommended action
 !analyze - score the watchlist and suggest wait/hold/stage trade
 !trade SPY 5 - stage a $5 paper trade
 !approve CODE - approve staged trade
 !cancel - cancel staged trade
+!cancelorder - cancel the newest open Alpaca paper order
+!cancelorder all - cancel all open Alpaca paper orders
 !autotest - send a test auto-report to the configured report channel
 
 Safety:
@@ -521,6 +705,18 @@ async def auto_report_loop(client):
                 previous_snapshot = saved_state.get("snapshot", {})
                 alert = build_change_alert(previous_snapshot, current_state, account, clock, positions, open_orders, recent_orders)
                 await send_codeblock(channel, alert)
+
+                opened_now = previous_snapshot.get("market_open") is False and current_state.get("market_open") is True
+                if opened_now and auto_analyze_at_open_enabled():
+                    try:
+                        analysis = paper_bot.analyze_market(account, clock, positions, open_orders)
+                    except RuntimeError as error:
+                        analysis = f"Auto-analysis failed:\n{error}"
+                    await send_codeblock(channel, analysis)
+
+                risk_alert = build_risk_alerts(positions, saved_state)
+                if risk_alert:
+                    await send_codeblock(channel, risk_alert)
 
                 closed_now = previous_snapshot.get("market_open") is True and current_state.get("market_open") is False
                 already_sent_today = saved_state.get("last_daily_recap_date") == utc_today()
@@ -578,6 +774,10 @@ def make_client(allowed_user_id):
             await handle_status(message)
         elif command == "!brief":
             await handle_brief(message)
+        elif command == "!pnl":
+            await handle_pnl(message)
+        elif command == "!journal":
+            await handle_journal(message)
         elif command == "!recap":
             await handle_recap(message)
         elif command == "!suggest":
@@ -590,6 +790,8 @@ def make_client(allowed_user_id):
             await handle_approve(message, args)
         elif command == "!cancel":
             await handle_cancel(message)
+        elif command == "!cancelorder":
+            await handle_cancelorder(message, args)
         elif command == "!autotest":
             await handle_autotest(message, client)
         else:
