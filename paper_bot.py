@@ -97,6 +97,10 @@ def get_orders(status="open", limit=50):
     return alpaca_request("GET", f"/orders?{query}")
 
 
+def cancel_order(order_id):
+    return alpaca_request("DELETE", f"/orders/{order_id}")
+
+
 def get_daily_bars(symbol, limit=60):
     query = urlencode({
         "timeframe": "1Day",
@@ -164,6 +168,15 @@ def log_trade(symbol, dollars, status, details):
             status,
             details,
         ])
+
+
+def read_trade_log(limit=10):
+    if not LOG_FILE.exists():
+        return []
+
+    with LOG_FILE.open("r", newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    return rows[-limit:]
 
 
 def pick_symbol(positions):
