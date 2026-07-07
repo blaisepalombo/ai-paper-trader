@@ -1,6 +1,8 @@
 import asyncio
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -15,6 +17,7 @@ import paper_bot
 
 
 COMMAND_PREFIX = "!"
+AUTO_STATE_FILE = Path("auto_report_state.json")
 pending_trade = None
 last_auto_fingerprint = None
 
@@ -65,11 +68,32 @@ def report_interval_seconds():
         return 300
 
 
+def daily_recap_enabled():
+    return os.environ.get("DAILY_RECAP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def report_channel_id():
     value = os.environ.get("DISCORD_REPORT_CHANNEL_ID", "").strip()
     if not value or value == "put_your_discord_report_channel_id_here":
         return None
     return int(value)
+
+
+def utc_today():
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def load_auto_state():
+    if not AUTO_STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(AUTO_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_auto_state(state):
+    AUTO_STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def allowed(message, allowed_user_id):
@@ -136,7 +160,55 @@ def build_short_update(account, clock, positions, open_orders):
     return "\n".join(lines)
 
 
-def status_fingerprint(clock, positions, open_orders):
+def build_daily_recap(account, clock, positions, open_orders, recent_orders):
+    lines = [
+        "AI Paper Trader Daily Recap",
+        f"Report time UTC: {datetime.now(timezone.utc).isoformat()}",
+        f"Market open: {clock.get('is_open')}",
+        f"Open positions: {len(positions)}",
+        f"Open orders: {len(open_orders)}",
+    ]
+
+    total_value = 0.0
+    total_pl = 0.0
+    if positions:
+        lines.append("")
+        lines.append("Positions:")
+        for position in positions:
+            symbol = position.get("symbol", "?")
+            value = float(position.get("market_value") or 0)
+            pl = float(position.get("unrealized_pl") or 0)
+            plpc = float(position.get("unrealized_plpc") or 0) * 100
+            total_value += value
+            total_pl += pl
+            lines.append(
+                f"- {symbol}: value {paper_bot.money(value)}, "
+                f"P/L {paper_bot.money(pl)} ({paper_bot.percent(plpc)})"
+            )
+        lines.append(f"Total open value: {paper_bot.money(total_value)}")
+        lines.append(f"Total open P/L: {paper_bot.money(total_pl)}")
+    else:
+        lines.append("")
+        lines.append("Positions: none")
+
+    if recent_orders:
+        lines.append("")
+        lines.append("Recent orders:")
+        for order in recent_orders[:5]:
+            lines.append(f"- {paper_bot.order_label(order)}")
+
+    lines.append("")
+    if open_orders:
+        lines.append("Next: wait for the open order.")
+    elif positions:
+        lines.append("Next: hold and review before adding anything.")
+    else:
+        lines.append("Next: no position is open. Run !analyze during market hours.")
+
+    return "\n".join(lines)
+
+
+def status_fingerprint(clock, positions, open_orders, recent_orders=None):
     position_bits = [
         (
             position.get("symbol"),
@@ -155,7 +227,77 @@ def status_fingerprint(clock, positions, open_orders):
         )
         for order in open_orders
     ]
-    return repr((clock.get("is_open"), position_bits, order_bits))
+    recent_order_bits = []
+    for order in (recent_orders or [])[:10]:
+        recent_order_bits.append((
+            order.get("id"),
+            order.get("symbol"),
+            order.get("status"),
+            order.get("filled_qty"),
+            order.get("filled_avg_price"),
+        ))
+    return repr((clock.get("is_open"), position_bits, order_bits, recent_order_bits))
+
+
+def order_state(order):
+    return {
+        "symbol": order.get("symbol"),
+        "side": order.get("side"),
+        "status": order.get("status"),
+        "filled_qty": order.get("filled_qty"),
+        "filled_avg_price": order.get("filled_avg_price"),
+    }
+
+
+def current_auto_state(clock, positions, open_orders, recent_orders):
+    return {
+        "market_open": bool(clock.get("is_open")),
+        "open_order_ids": sorted(str(order.get("id")) for order in open_orders if order.get("id")),
+        "position_symbols": sorted(str(position.get("symbol")) for position in positions if position.get("symbol")),
+        "recent_orders": {
+            str(order.get("id")): order_state(order)
+            for order in recent_orders[:20]
+            if order.get("id")
+        },
+    }
+
+
+def build_change_alert(previous, current, account, clock, positions, open_orders, recent_orders):
+    lines = []
+
+    previous_market = previous.get("market_open")
+    current_market = current.get("market_open")
+    if previous_market is False and current_market is True:
+        lines.append("Market opened.")
+    elif previous_market is True and current_market is False:
+        lines.append("Market closed.")
+
+    previous_orders = previous.get("recent_orders", {})
+    for order in recent_orders[:10]:
+        order_id = str(order.get("id") or "")
+        if not order_id:
+            continue
+        previous_order = previous_orders.get(order_id, {})
+        old_status = previous_order.get("status")
+        new_status = order.get("status")
+        if old_status != "filled" and new_status == "filled":
+            lines.append(f"Order filled: {paper_bot.order_label(order)}")
+        elif old_status and old_status != new_status:
+            lines.append(f"Order update: {paper_bot.order_label(order)}")
+
+    previous_positions = set(previous.get("position_symbols", []))
+    current_positions = set(current.get("position_symbols", []))
+    for symbol in sorted(current_positions - previous_positions):
+        lines.append(f"New open position: {symbol}")
+    for symbol in sorted(previous_positions - current_positions):
+        lines.append(f"Position no longer open: {symbol}")
+
+    if not lines:
+        return build_short_update(account, clock, positions, open_orders)
+
+    lines.append("")
+    lines.append(build_short_update(account, clock, positions, open_orders))
+    return "\n".join(lines)
 
 
 async def send_codeblock(channel, text):
@@ -189,6 +331,15 @@ async def handle_brief(message):
     await send_codeblock(message.channel, build_short_update(account, clock, positions, open_orders))
 
 
+async def handle_recap(message):
+    account = paper_bot.get_account()
+    clock = paper_bot.get_clock()
+    positions = paper_bot.get_positions()
+    open_orders = paper_bot.get_orders("open")
+    recent_orders = paper_bot.get_orders("all", 20)
+    await send_codeblock(message.channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
+
+
 async def handle_channelid(message):
     await message.channel.send(f"This channel ID is `{message.channel.id}`")
 
@@ -208,7 +359,10 @@ async def handle_autotest(message, client):
     clock = paper_bot.get_clock()
     positions = paper_bot.get_positions()
     open_orders = paper_bot.get_orders("open")
+    recent_orders = paper_bot.get_orders("all", 10)
     await send_codeblock(channel, build_short_update(account, clock, positions, open_orders))
+    if daily_recap_enabled():
+        await send_codeblock(channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
     await message.channel.send("Sent a test auto-report.")
 
 
@@ -314,6 +468,7 @@ def help_text():
 !channelid - show this channel's ID for auto reports
 !status - show full bot report
 !brief - show short bot report
+!recap - show daily recap style report
 !suggest - show next recommended action
 !analyze - score the watchlist and suggest wait/hold/stage trade
 !trade SPY 5 - stage a $5 paper trade
@@ -349,6 +504,7 @@ async def auto_report_loop(client):
         return
 
     print(f"Auto reports enabled for channel {channel_id}.")
+    saved_state = load_auto_state()
 
     while not client.is_closed():
         try:
@@ -356,11 +512,24 @@ async def auto_report_loop(client):
             clock = paper_bot.get_clock()
             positions = paper_bot.get_positions()
             open_orders = paper_bot.get_orders("open")
-            fingerprint = status_fingerprint(clock, positions, open_orders)
+            recent_orders = paper_bot.get_orders("all", 20)
+            current_state = current_auto_state(clock, positions, open_orders, recent_orders)
+            fingerprint = status_fingerprint(clock, positions, open_orders, recent_orders)
 
             if fingerprint != last_auto_fingerprint:
                 last_auto_fingerprint = fingerprint
-                await send_codeblock(channel, build_short_update(account, clock, positions, open_orders))
+                previous_snapshot = saved_state.get("snapshot", {})
+                alert = build_change_alert(previous_snapshot, current_state, account, clock, positions, open_orders, recent_orders)
+                await send_codeblock(channel, alert)
+
+                closed_now = previous_snapshot.get("market_open") is True and current_state.get("market_open") is False
+                already_sent_today = saved_state.get("last_daily_recap_date") == utc_today()
+                if closed_now and daily_recap_enabled() and not already_sent_today:
+                    await send_codeblock(channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
+                    saved_state["last_daily_recap_date"] = utc_today()
+
+                saved_state["snapshot"] = current_state
+                save_auto_state(saved_state)
         except Exception as error:
             print(f"Auto report failed: {error}")
 
@@ -409,6 +578,8 @@ def make_client(allowed_user_id):
             await handle_status(message)
         elif command == "!brief":
             await handle_brief(message)
+        elif command == "!recap":
+            await handle_recap(message)
         elif command == "!suggest":
             await handle_suggest(message)
         elif command == "!analyze":
