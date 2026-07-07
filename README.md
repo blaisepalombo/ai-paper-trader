@@ -98,12 +98,16 @@ Important: do not paste your Alpaca keys or Discord bot token into Discord or Ch
 !channelid
 !status
 !brief
+!pnl
+!journal
 !recap
 !suggest
 !analyze
 !trade SPY 5
 !approve CODE
 !cancel
+!cancelorder
+!cancelorder all
 !autotest
 ```
 
@@ -210,6 +214,9 @@ DISCORD_REPORT_CHANNEL_ID=your_channel_id
 AUTO_REPORTS_ENABLED=true
 REPORT_INTERVAL_SECONDS=300
 DAILY_RECAP_ENABLED=true
+AUTO_ANALYZE_AT_OPEN=true
+STOP_LOSS_PCT=3
+TAKE_PROFIT_PCT=5
 ```
 
 To get the channel ID, type this in Discord:
@@ -247,3 +254,25 @@ You can request the same recap manually:
 ```text
 !recap
 ```
+
+## Version 7 Control And Risk Alerts
+
+The bot now has more phone controls:
+
+```text
+!pnl
+!journal
+!cancelorder
+!cancelorder all
+```
+
+What changed:
+
+- `!cancelorder` requests cancellation of the newest open Alpaca paper order.
+- `!cancelorder all` requests cancellation of all open Alpaca paper orders.
+- `!journal` shows the local bot trade log plus recent Alpaca orders.
+- `!pnl` shows virtual capital, open market value, open unrealized P/L, and estimated experiment value.
+- When the market opens, the bot can automatically run `!analyze` and post the result.
+- The bot sends stop-loss and take-profit alerts based on `.env` percentages.
+
+These risk alerts do not sell anything automatically. They are notification-only.
