@@ -95,12 +95,15 @@ Important: do not paste your Alpaca keys or Discord bot token into Discord or Ch
 ```text
 !help
 !whoami
+!channelid
 !status
+!brief
 !suggest
 !analyze
 !trade SPY 5
 !approve CODE
 !cancel
+!autotest
 ```
 
 Trades still require a two-step flow:
@@ -193,4 +196,34 @@ Oracle runs the bot on a tiny Linux VM. See:
 ```text
 deploy/oracle/README_ORACLE.md
 deploy/oracle/setup_oracle_vm.sh
+```
+
+## Version 5 Auto Reports
+
+The bot can send short Discord updates automatically when market/order/position state changes.
+
+Add these to `.env`:
+
+```text
+DISCORD_REPORT_CHANNEL_ID=your_channel_id
+AUTO_REPORTS_ENABLED=true
+REPORT_INTERVAL_SECONDS=300
+```
+
+To get the channel ID, type this in Discord:
+
+```text
+!channelid
+```
+
+After adding the channel ID on Oracle, restart the bot:
+
+```bash
+sudo systemctl restart ai-paper-trader
+```
+
+Then test:
+
+```text
+!autotest
 ```

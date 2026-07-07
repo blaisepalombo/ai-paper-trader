@@ -43,6 +43,9 @@ APCA_API_BASE_URL=https://paper-api.alpaca.markets/v2
 APCA_DATA_BASE_URL=https://data.alpaca.markets/v2
 DISCORD_BOT_TOKEN=your_discord_bot_token
 DISCORD_ALLOWED_USER_ID=your_discord_user_id
+DISCORD_REPORT_CHANNEL_ID=your_discord_channel_id
+AUTO_REPORTS_ENABLED=true
+REPORT_INTERVAL_SECONDS=300
 ```
 
 Save nano:
@@ -73,6 +76,34 @@ journalctl -u ai-paper-trader -f
 
 ```bash
 sudo systemctl restart ai-paper-trader
+```
+
+## Enable Auto Reports
+
+In Discord, type:
+
+```text
+!channelid
+```
+
+Copy the number into `.env`:
+
+```text
+DISCORD_REPORT_CHANNEL_ID=that_channel_id
+AUTO_REPORTS_ENABLED=true
+REPORT_INTERVAL_SECONDS=300
+```
+
+Restart:
+
+```bash
+sudo systemctl restart ai-paper-trader
+```
+
+Then test in Discord:
+
+```text
+!autotest
 ```
 
 ## Stop Bot
