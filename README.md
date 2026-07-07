@@ -98,6 +98,7 @@ Important: do not paste your Alpaca keys or Discord bot token into Discord or Ch
 !channelid
 !status
 !brief
+!recap
 !suggest
 !analyze
 !trade SPY 5
@@ -208,6 +209,7 @@ Add these to `.env`:
 DISCORD_REPORT_CHANNEL_ID=your_channel_id
 AUTO_REPORTS_ENABLED=true
 REPORT_INTERVAL_SECONDS=300
+DAILY_RECAP_ENABLED=true
 ```
 
 To get the channel ID, type this in Discord:
@@ -226,4 +228,22 @@ Then test:
 
 ```text
 !autotest
+```
+
+## Version 6 Fill Alerts And Recaps
+
+The bot now watches for order and position changes and sends clearer Discord alerts:
+
+- `Market opened.`
+- `Market closed.`
+- `Order filled: ...`
+- `New open position: ...`
+- `Position no longer open: ...`
+
+It also sends one daily recap after it sees the market change from open to closed.
+
+You can request the same recap manually:
+
+```text
+!recap
 ```
