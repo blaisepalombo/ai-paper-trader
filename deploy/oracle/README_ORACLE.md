@@ -117,8 +117,38 @@ sudo systemctl stop ai-paper-trader
 ```bash
 cd ~/ai-paper-trader
 git pull
-bash deploy/oracle/setup_oracle_vm.sh
+python3 -m py_compile paper_bot.py discord_control.py
 sudo systemctl restart ai-paper-trader
+```
+
+## Optional: Auto-Update From GitHub
+
+This lets the Oracle VM check GitHub every 5 minutes. If the repo changed, it pulls the update, installs requirements, checks the Python files, and restarts the bot.
+
+Run this once:
+
+```bash
+cd ~/ai-paper-trader
+git pull
+bash deploy/oracle/install_auto_update.sh
+```
+
+Check that the timer is active:
+
+```bash
+systemctl list-timers ai-paper-trader-auto-update.timer
+```
+
+Force an update check right now:
+
+```bash
+sudo systemctl start ai-paper-trader-auto-update.service
+```
+
+View update logs:
+
+```bash
+journalctl -u ai-paper-trader-auto-update.service -n 80 --no-pager
 ```
 
 ## Safety Notes
