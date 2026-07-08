@@ -10,11 +10,10 @@ from threading import Thread
 try:
     import discord
 except ImportError:
-    print("Missing discord.py. Run install_discord_windows.bat first.")
+    print("Missing discord.py. Install requirements first.")
     sys.exit(1)
 
 import paper_bot
-
 
 COMMAND_PREFIX = "!"
 AUTO_STATE_FILE = Path("auto_report_state.json")
@@ -51,13 +50,25 @@ def load_settings():
         sys.exit(1)
     if not allowed_user_id or allowed_user_id == "put_your_discord_user_id_here":
         print("Missing DISCORD_ALLOWED_USER_ID in .env.")
-        print("Run the bot after adding the token, type !whoami in Discord, then paste that ID into .env.")
+        print("Type !whoami in Discord, then paste that ID into .env.")
 
     return token, allowed_user_id
 
 
+def setting_enabled(name, default="true"):
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def auto_reports_enabled():
-    return os.environ.get("AUTO_REPORTS_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return setting_enabled("AUTO_REPORTS_ENABLED", "true")
+
+
+def daily_recap_enabled():
+    return setting_enabled("DAILY_RECAP_ENABLED", "true")
+
+
+def auto_analyze_at_open_enabled():
+    return setting_enabled("AUTO_ANALYZE_AT_OPEN", "true")
 
 
 def report_interval_seconds():
@@ -66,14 +77,6 @@ def report_interval_seconds():
         return max(60, int(raw))
     except ValueError:
         return 300
-
-
-def daily_recap_enabled():
-    return os.environ.get("DAILY_RECAP_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def auto_analyze_at_open_enabled():
-    return os.environ.get("AUTO_ANALYZE_AT_OPEN", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def stop_loss_percent():
@@ -132,6 +135,11 @@ def split_message(text, max_len=1800):
     return chunks
 
 
+async def send_codeblock(channel, text):
+    for chunk in split_message(text):
+        await channel.send(f"```text\n{chunk}\n```")
+
+
 def get_report():
     account = paper_bot.get_account()
     clock = paper_bot.get_clock()
@@ -143,11 +151,34 @@ def get_report():
     return report, account, clock, positions, open_orders, recent_orders
 
 
-def next_action_from_report(report):
-    marker = "Next Action:"
-    if marker not in report:
-        return report
-    return report.split(marker, 1)[1].strip()
+def portfolio_summary(positions):
+    open_value = 0.0
+    open_pl = 0.0
+    for position in positions:
+        open_value += float(position.get("market_value") or 0)
+        open_pl += float(position.get("unrealized_pl") or 0)
+    return {
+        "virtual_capital": paper_bot.VIRTUAL_CAPITAL,
+        "open_value": open_value,
+        "open_pl": open_pl,
+        "estimated_value": paper_bot.VIRTUAL_CAPITAL + open_pl,
+    }
+
+
+def build_portfolio_summary(positions):
+    summary = portfolio_summary(positions)
+    exposure_pct = 0.0
+    if paper_bot.VIRTUAL_CAPITAL:
+        exposure_pct = (summary["open_value"] / paper_bot.VIRTUAL_CAPITAL) * 100
+    lines = [
+        "AI Paper Trader Portfolio",
+        f"Virtual starting capital: {paper_bot.money(summary['virtual_capital'])}",
+        f"Open market value: {paper_bot.money(summary['open_value'])}",
+        f"Open unrealized P/L: {paper_bot.money(summary['open_pl'])}",
+        f"Estimated experiment value: {paper_bot.money(summary['estimated_value'])}",
+        f"Open exposure: {paper_bot.percent(exposure_pct)}",
+    ]
+    return "\n".join(lines)
 
 
 def build_short_update(account, clock, positions, open_orders):
@@ -183,36 +214,6 @@ def build_short_update(account, clock, positions, open_orders):
     return "\n".join(lines)
 
 
-def portfolio_summary(positions):
-    open_value = 0.0
-    open_pl = 0.0
-    for position in positions:
-        open_value += float(position.get("market_value") or 0)
-        open_pl += float(position.get("unrealized_pl") or 0)
-    return {
-        "virtual_capital": paper_bot.VIRTUAL_CAPITAL,
-        "open_value": open_value,
-        "open_pl": open_pl,
-        "estimated_value": paper_bot.VIRTUAL_CAPITAL + open_pl,
-    }
-
-
-def build_portfolio_summary(positions):
-    summary = portfolio_summary(positions)
-    exposure_pct = 0.0
-    if paper_bot.VIRTUAL_CAPITAL:
-        exposure_pct = (summary["open_value"] / paper_bot.VIRTUAL_CAPITAL) * 100
-    lines = [
-        "AI Paper Trader Portfolio",
-        f"Virtual starting capital: {paper_bot.money(summary['virtual_capital'])}",
-        f"Open market value: {paper_bot.money(summary['open_value'])}",
-        f"Open unrealized P/L: {paper_bot.money(summary['open_pl'])}",
-        f"Estimated experiment value: {paper_bot.money(summary['estimated_value'])}",
-        f"Open exposure: {paper_bot.percent(exposure_pct)}",
-    ]
-    return "\n".join(lines)
-
-
 def build_daily_recap(account, clock, positions, open_orders, recent_orders):
     lines = [
         "AI Paper Trader Daily Recap",
@@ -220,11 +221,9 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
         f"Market open: {clock.get('is_open')}",
         f"Open positions: {len(positions)}",
         f"Open orders: {len(open_orders)}",
+        build_portfolio_summary(positions),
     ]
-    lines.append(build_portfolio_summary(positions))
 
-    total_value = 0.0
-    total_pl = 0.0
     if positions:
         lines.append("")
         lines.append("Positions:")
@@ -233,14 +232,7 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
             value = float(position.get("market_value") or 0)
             pl = float(position.get("unrealized_pl") or 0)
             plpc = float(position.get("unrealized_plpc") or 0) * 100
-            total_value += value
-            total_pl += pl
-            lines.append(
-                f"- {symbol}: value {paper_bot.money(value)}, "
-                f"P/L {paper_bot.money(pl)} ({paper_bot.percent(plpc)})"
-            )
-        lines.append(f"Total open value: {paper_bot.money(total_value)}")
-        lines.append(f"Total open P/L: {paper_bot.money(total_pl)}")
+            lines.append(f"- {symbol}: value {paper_bot.money(value)}, P/L {paper_bot.money(pl)} ({paper_bot.percent(plpc)})")
     else:
         lines.append("")
         lines.append("Positions: none")
@@ -262,31 +254,35 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
     return "\n".join(lines)
 
 
+def build_risk_settings_report(positions=None):
+    sl_pct = stop_loss_percent()
+    tp_pct = take_profit_percent()
+    lines = [
+        "AI Paper Trader Risk Settings",
+        f"Stop-loss alert: {sl_pct:g}% below entry",
+        f"Take-profit alert: {tp_pct:g}% above entry",
+        "Mode: alert-only. The bot will not sell automatically.",
+    ]
+
+    if positions:
+        lines.append("")
+        lines.append("Current position alert areas:")
+        for position in positions:
+            symbol = position.get("symbol", "?")
+            avg = float(position.get("avg_entry_price") or 0)
+            if avg <= 0:
+                continue
+            stop_price = avg * (1 - sl_pct / 100)
+            target_price = avg * (1 + tp_pct / 100)
+            lines.append(f"- {symbol}: stop area {paper_bot.money(stop_price)}, target area {paper_bot.money(target_price)}")
+
+    return "\n".join(lines)
+
+
 def status_fingerprint(clock, positions, open_orders, recent_orders=None):
-    position_bits = [
-        (
-            position.get("symbol"),
-            position.get("qty"),
-        )
-        for position in positions
-    ]
-    order_bits = [
-        (
-            order.get("id"),
-            order.get("symbol"),
-            order.get("status"),
-            order.get("filled_qty"),
-        )
-        for order in open_orders
-    ]
-    recent_order_bits = []
-    for order in (recent_orders or [])[:10]:
-        recent_order_bits.append((
-            order.get("id"),
-            order.get("symbol"),
-            order.get("status"),
-            order.get("filled_qty"),
-        ))
+    position_bits = [(p.get("symbol"), p.get("qty")) for p in positions]
+    order_bits = [(o.get("id"), o.get("symbol"), o.get("status"), o.get("filled_qty")) for o in open_orders]
+    recent_order_bits = [(o.get("id"), o.get("symbol"), o.get("status"), o.get("filled_qty")) for o in (recent_orders or [])[:10]]
     return repr((clock.get("is_open"), position_bits, order_bits, recent_order_bits))
 
 
@@ -297,6 +293,15 @@ def order_state(order):
         "status": order.get("status"),
         "filled_qty": order.get("filled_qty"),
         "filled_avg_price": order.get("filled_avg_price"),
+    }
+
+
+def current_auto_state(clock, positions, open_orders, recent_orders):
+    return {
+        "market_open": bool(clock.get("is_open")),
+        "open_order_ids": sorted(str(order.get("id")) for order in open_orders if order.get("id")),
+        "position_symbols": sorted(str(position.get("symbol")) for position in positions if position.get("symbol")),
+        "recent_orders": {str(order.get("id")): order_state(order) for order in recent_orders[:20] if order.get("id")},
     }
 
 
@@ -338,30 +343,11 @@ def build_risk_alerts(positions, saved_state):
         stop_price = avg * (1 - sl_pct / 100)
         target_price = avg * (1 + tp_pct / 100)
         if f"{symbol}:stop" in new_keys:
-            lines.append(
-                f"- {symbol} is at or below stop alert: current {paper_bot.money(current)}, "
-                f"stop area {paper_bot.money(stop_price)} ({sl_pct:g}% below entry)"
-            )
+            lines.append(f"- {symbol} is at or below stop alert: current {paper_bot.money(current)}, stop area {paper_bot.money(stop_price)} ({sl_pct:g}% below entry)")
         if f"{symbol}:target" in new_keys:
-            lines.append(
-                f"- {symbol} is at or above take-profit alert: current {paper_bot.money(current)}, "
-                f"target area {paper_bot.money(target_price)} ({tp_pct:g}% above entry)"
-            )
+            lines.append(f"- {symbol} is at or above take-profit alert: current {paper_bot.money(current)}, target area {paper_bot.money(target_price)} ({tp_pct:g}% above entry)")
     lines.append("Alert only. The bot did not sell or place a new order.")
     return "\n".join(lines)
-
-
-def current_auto_state(clock, positions, open_orders, recent_orders):
-    return {
-        "market_open": bool(clock.get("is_open")),
-        "open_order_ids": sorted(str(order.get("id")) for order in open_orders if order.get("id")),
-        "position_symbols": sorted(str(position.get("symbol")) for position in positions if position.get("symbol")),
-        "recent_orders": {
-            str(order.get("id")): order_state(order)
-            for order in recent_orders[:20]
-            if order.get("id")
-        },
-    }
 
 
 def build_change_alert(previous, current, account, clock, positions, open_orders, recent_orders):
@@ -379,8 +365,7 @@ def build_change_alert(previous, current, account, clock, positions, open_orders
         order_id = str(order.get("id") or "")
         if not order_id:
             continue
-        previous_order = previous_orders.get(order_id, {})
-        old_status = previous_order.get("status")
+        old_status = previous_orders.get(order_id, {}).get("status")
         new_status = order.get("status")
         if old_status != "filled" and new_status == "filled":
             lines.append(f"Order filled: {paper_bot.order_label(order)}")
@@ -402,11 +387,6 @@ def build_change_alert(previous, current, account, clock, positions, open_orders
     return "\n".join(lines)
 
 
-async def send_codeblock(channel, text):
-    for chunk in split_message(text):
-        await channel.send(f"```text\n{chunk}\n```")
-
-
 async def handle_status(message):
     report, *_ = get_report()
     await send_codeblock(message.channel, report)
@@ -414,7 +394,9 @@ async def handle_status(message):
 
 async def handle_suggest(message):
     report, *_ = get_report()
-    await send_codeblock(message.channel, f"Suggested next action:\n{next_action_from_report(report)}")
+    marker = "Next Action:"
+    suggestion = report.split(marker, 1)[1].strip() if marker in report else report
+    await send_codeblock(message.channel, f"Suggested next action:\n{suggestion}")
 
 
 async def handle_analyze(message):
@@ -434,8 +416,12 @@ async def handle_brief(message):
 
 
 async def handle_pnl(message):
+    await send_codeblock(message.channel, build_portfolio_summary(paper_bot.get_positions()))
+
+
+async def handle_risk(message):
     positions = paper_bot.get_positions()
-    await send_codeblock(message.channel, build_portfolio_summary(positions))
+    await send_codeblock(message.channel, build_risk_settings_report(positions))
 
 
 async def handle_journal(message):
@@ -509,19 +495,15 @@ async def handle_cancelorder(message, args):
         await message.channel.send("No open Alpaca paper orders to cancel.")
         return
 
-    if args and args[0].lower() != "all":
+    if args and args[0].lower() == "all":
+        target_orders = open_orders
+    elif args:
         requested = args[0]
-        matching = [
-            order
-            for order in open_orders
-            if str(order.get("id", "")).startswith(requested) or order.get("symbol", "").upper() == requested.upper()
-        ]
+        matching = [o for o in open_orders if str(o.get("id", "")).startswith(requested) or o.get("symbol", "").upper() == requested.upper()]
         if not matching:
             await message.channel.send("No matching open order. Use `!status` to see open orders, or `!cancelorder all`.")
             return
         target_orders = matching[:1]
-    elif args and args[0].lower() == "all":
-        target_orders = open_orders
     else:
         target_orders = open_orders[:1]
 
@@ -559,7 +541,6 @@ async def handle_trade(message, args):
         await message.channel.send("Dollar amount must be a number. Example: `!trade SPY 5`")
         return
 
-    account = paper_bot.get_account()
     clock = paper_bot.get_clock()
     positions = paper_bot.get_positions()
     open_orders = paper_bot.get_orders("open")
@@ -590,12 +571,7 @@ async def handle_trade(message, args):
         return
 
     code = f"{symbol}-{int(dollars * 100)}"
-    pending_trade = {
-        "user_id": str(message.author.id),
-        "symbol": symbol,
-        "dollars": dollars,
-        "code": code,
-    }
+    pending_trade = {"user_id": str(message.author.id), "symbol": symbol, "dollars": dollars, "code": code}
 
     await message.channel.send(
         f"Paper trade staged: buy `${dollars:.2f}` of `{symbol}`.\n"
@@ -646,6 +622,7 @@ def help_text():
 !status - show full bot report
 !brief - show short bot report
 !pnl - show experiment P/L summary
+!risk - show active stop-loss and take-profit alert settings
 !journal - show local trade log and recent Alpaca orders
 !recap - show daily recap style report
 !suggest - show next recommended action
@@ -750,8 +727,7 @@ def make_client(allowed_user_id):
         if not message.content.startswith(COMMAND_PREFIX):
             return
 
-        command_line = message.content.strip()
-        parts = command_line.split()
+        parts = message.content.strip().split()
         command = parts[0].lower()
         args = parts[1:]
 
@@ -776,6 +752,8 @@ def make_client(allowed_user_id):
             await handle_brief(message)
         elif command == "!pnl":
             await handle_pnl(message)
+        elif command == "!risk":
+            await handle_risk(message)
         elif command == "!journal":
             await handle_journal(message)
         elif command == "!recap":
