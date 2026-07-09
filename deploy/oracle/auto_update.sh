@@ -57,12 +57,8 @@ if [ "${local_sha}" = "${remote_sha}" ]; then
   exit 0
 fi
 
-if [ -n "$(git_as_app_user status --porcelain --untracked-files=no)" ]; then
-  log "Local tracked files changed. Skipping auto-update so nothing gets overwritten."
-  exit 1
-fi
-
-log "Updating ${local_sha} -> ${remote_sha}"
+log "Force syncing ${local_sha} -> ${remote_sha}"
+log "Local tracked file changes will be overwritten. Untracked secrets like .env are preserved."
 git_as_app_user reset --hard "origin/${BRANCH}" >/dev/null
 
 rollback() {
@@ -77,7 +73,7 @@ if ! run_as_app_user "'${PYTHON_BIN}' -m pip install -r requirements.txt >/dev/n
 fi
 
 log "Checking Python files..."
-if ! run_as_app_user "'${PYTHON_BIN}' -m py_compile paper_bot.py discord_control.py"; then
+if ! run_as_app_user "'${PYTHON_BIN}' -m py_compile bot_config.py paper_bot.py discord_control.py"; then
   rollback
   exit 1
 fi
@@ -85,4 +81,4 @@ fi
 log "Restarting ${SERVICE_NAME}..."
 restart_service
 
-log "Update complete."
+log "Update complete. Deployed ${remote_sha}."
