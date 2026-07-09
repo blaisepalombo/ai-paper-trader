@@ -17,6 +17,31 @@ ALLOWED_SYMBOLS = {"SPY", "QQQ", "VOO", "AAPL", "MSFT", "NVDA", "AMZN", "META", 
 ANALYZE_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
 LOG_FILE = Path("trade_log.csv")
 REPORT_FILE = Path("daily_report.txt")
+RISK_SETTINGS_FILE = Path(__file__).with_name("risk_settings.json")
+RISK_KEYS = {"STOP_LOSS_PCT", "TAKE_PROFIT_PCT"}
+
+
+def load_risk_settings():
+    """Load tracked risk settings after .env so test thresholds can be changed from GitHub."""
+    if not RISK_SETTINGS_FILE.exists():
+        return
+
+    try:
+        settings = json.loads(RISK_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+
+    for key in RISK_KEYS:
+        value = settings.get(key)
+        if value is None:
+            continue
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric_value <= 0:
+            continue
+        os.environ[key] = str(numeric_value)
 
 
 def load_env(path=".env"):
@@ -24,6 +49,7 @@ def load_env(path=".env"):
     if not env_path.exists():
         required = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"]
         if all(os.environ.get(key) for key in required):
+            load_risk_settings()
             return
         print("Missing .env file. Copy .env.example, rename it to .env, then add your paper keys.")
         print("On cloud hosting, set the same values as environment variables instead.")
@@ -35,6 +61,8 @@ def load_env(path=".env"):
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip())
+
+    load_risk_settings()
 
 
 def alpaca_request(method, path, body=None):
