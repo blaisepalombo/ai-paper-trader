@@ -8,40 +8,34 @@ from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import bot_config
 
-VIRTUAL_CAPITAL = 50.00
-MAX_DOLLARS_PER_TRADE = 5.00
-MAX_OPEN_POSITIONS = 3
-MAX_OPEN_ORDERS = 1
-ALLOWED_SYMBOLS = {"SPY", "QQQ", "VOO", "AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"}
-ANALYZE_WATCHLIST = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+
 LOG_FILE = Path("trade_log.csv")
 REPORT_FILE = Path("daily_report.txt")
-RISK_SETTINGS_FILE = Path(__file__).with_name("risk_settings.json")
-RISK_KEYS = {"STOP_LOSS_PCT", "TAKE_PROFIT_PCT"}
 
 
-def load_risk_settings():
-    """Load tracked risk settings after .env so test thresholds can be changed from GitHub."""
-    if not RISK_SETTINGS_FILE.exists():
-        return
+def reload_config():
+    global VIRTUAL_CAPITAL
+    global MAX_DOLLARS_PER_TRADE
+    global MAX_OPEN_POSITIONS
+    global MAX_OPEN_ORDERS
+    global ONE_BOT_ORDER_PER_DAY
+    global ALLOWED_SYMBOLS
+    global ANALYZE_WATCHLIST
 
-    try:
-        settings = json.loads(RISK_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+    config = bot_config.reload_config()
+    VIRTUAL_CAPITAL = bot_config.virtual_capital(config)
+    MAX_DOLLARS_PER_TRADE = bot_config.max_dollars_per_trade(config)
+    MAX_OPEN_POSITIONS = bot_config.max_open_positions(config)
+    MAX_OPEN_ORDERS = bot_config.max_open_orders(config)
+    ONE_BOT_ORDER_PER_DAY = bot_config.one_bot_order_per_day(config)
+    ALLOWED_SYMBOLS = bot_config.allowed_symbols(config)
+    ANALYZE_WATCHLIST = bot_config.analyze_watchlist(config)
+    return config
 
-    for key in RISK_KEYS:
-        value = settings.get(key)
-        if value is None:
-            continue
-        try:
-            numeric_value = float(value)
-        except (TypeError, ValueError):
-            continue
-        if numeric_value <= 0:
-            continue
-        os.environ[key] = str(numeric_value)
+
+reload_config()
 
 
 def load_env(path=".env"):
@@ -49,7 +43,7 @@ def load_env(path=".env"):
     if not env_path.exists():
         required = ["APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"]
         if all(os.environ.get(key) for key in required):
-            load_risk_settings()
+            reload_config()
             return
         print("Missing .env file. Copy .env.example, rename it to .env, then add your paper keys.")
         print("On cloud hosting, set the same values as environment variables instead.")
@@ -62,7 +56,7 @@ def load_env(path=".env"):
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip())
 
-    load_risk_settings()
+    reload_config()
 
 
 def alpaca_request(method, path, body=None):
@@ -170,6 +164,9 @@ def percent(value):
 
 
 def already_submitted_today():
+    if not ONE_BOT_ORDER_PER_DAY:
+        return False
+
     if not LOG_FILE.exists():
         return False
 
@@ -209,7 +206,7 @@ def read_trade_log(limit=10):
 
 def pick_symbol(positions):
     held_symbols = {position.get("symbol") for position in positions}
-    for symbol in ["SPY", "QQQ", "VOO", "MSFT", "AAPL"]:
+    for symbol in ANALYZE_WATCHLIST:
         if symbol not in held_symbols:
             return symbol
     return "SPY"
@@ -406,6 +403,7 @@ def build_report(account, clock, positions, open_orders, recent_orders):
     lines.append("AI Paper Trading Bot Report")
     lines.append("---------------------------")
     lines.append(f"Report time UTC: {datetime.now(timezone.utc).isoformat()}")
+    lines.append(f"Version: {bot_config.git_commit_short()}")
     lines.append(f"Virtual experiment size: {money(VIRTUAL_CAPITAL)}")
     lines.append(f"Max per paper trade: {money(MAX_DOLLARS_PER_TRADE)}")
     lines.append("Mode: Alpaca paper trading only")
