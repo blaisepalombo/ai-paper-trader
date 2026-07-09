@@ -1,0 +1,41 @@
+{
+  "reports": {
+    "auto_analyze_at_open": true,
+    "auto_reports_enabled": true,
+    "daily_recap_enabled": true,
+    "report_interval_seconds": 300,
+    "startup_notice_enabled": true
+  },
+  "risk": {
+    "mode": "alert_only",
+    "stop_loss_pct": 0.25,
+    "take_profit_pct": 0.25
+  },
+  "symbols": {
+    "allowed": [
+      "AAPL",
+      "AMZN",
+      "META",
+      "MSFT",
+      "NVDA",
+      "QQQ",
+      "SPY",
+      "TSLA",
+      "VOO"
+    ],
+    "analyze_watchlist": [
+      "SPY",
+      "QQQ",
+      "AAPL",
+      "MSFT",
+      "NVDA"
+    ]
+  },
+  "trading": {
+    "max_dollars_per_trade": 5.0,
+    "max_open_orders": 1,
+    "max_open_positions": 3,
+    "one_bot_order_per_day": true,
+    "virtual_capital": 50.0
+  }
+}
