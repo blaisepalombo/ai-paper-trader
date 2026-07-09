@@ -13,7 +13,9 @@ except ImportError:
     print("Missing discord.py. Install requirements first.")
     sys.exit(1)
 
+import bot_config
 import paper_bot
+
 
 COMMAND_PREFIX = "!"
 AUTO_STATE_FILE = Path("auto_report_state.json")
@@ -55,44 +57,28 @@ def load_settings():
     return token, allowed_user_id
 
 
-def setting_enabled(name, default="true"):
-    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
-
-
 def auto_reports_enabled():
-    return setting_enabled("AUTO_REPORTS_ENABLED", "true")
+    return bot_config.auto_reports_enabled()
 
 
 def daily_recap_enabled():
-    return setting_enabled("DAILY_RECAP_ENABLED", "true")
+    return bot_config.daily_recap_enabled()
 
 
 def auto_analyze_at_open_enabled():
-    return setting_enabled("AUTO_ANALYZE_AT_OPEN", "true")
+    return bot_config.auto_analyze_at_open_enabled()
 
 
 def report_interval_seconds():
-    raw = os.environ.get("REPORT_INTERVAL_SECONDS", "300").strip()
-    try:
-        return max(60, int(raw))
-    except ValueError:
-        return 300
+    return bot_config.report_interval_seconds()
 
 
 def stop_loss_percent():
-    raw = os.environ.get("STOP_LOSS_PCT", "3").strip()
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
-        return 3.0
+    return bot_config.stop_loss_percent()
 
 
 def take_profit_percent():
-    raw = os.environ.get("TAKE_PROFIT_PCT", "5").strip()
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
-        return 5.0
+    return bot_config.take_profit_percent()
 
 
 def report_channel_id():
@@ -184,6 +170,7 @@ def build_portfolio_summary(positions):
 def build_short_update(account, clock, positions, open_orders):
     lines = [
         "AI Paper Trader Update",
+        f"Version: {bot_config.git_commit_short()}",
         f"Market open: {clock.get('is_open')}",
         f"Open positions: {len(positions)}",
         f"Open orders: {len(open_orders)}",
@@ -217,6 +204,7 @@ def build_short_update(account, clock, positions, open_orders):
 def build_daily_recap(account, clock, positions, open_orders, recent_orders):
     lines = [
         "AI Paper Trader Daily Recap",
+        f"Version: {bot_config.git_commit_short()}",
         f"Report time UTC: {datetime.now(timezone.utc).isoformat()}",
         f"Market open: {clock.get('is_open')}",
         f"Open positions: {len(positions)}",
@@ -255,10 +243,12 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
 
 
 def build_risk_settings_report(positions=None):
-    sl_pct = stop_loss_percent()
-    tp_pct = take_profit_percent()
+    config = bot_config.get_config(force_reload=True)
+    sl_pct = bot_config.stop_loss_percent(config)
+    tp_pct = bot_config.take_profit_percent(config)
     lines = [
         "AI Paper Trader Risk Settings",
+        f"Version: {bot_config.git_commit_short()}",
         f"Stop-loss alert: {sl_pct:g}% below entry",
         f"Take-profit alert: {tp_pct:g}% above entry",
         "Mode: alert-only. The bot will not sell automatically.",
@@ -424,6 +414,20 @@ async def handle_risk(message):
     await send_codeblock(message.channel, build_risk_settings_report(positions))
 
 
+async def handle_config(message):
+    await send_codeblock(message.channel, bot_config.config_report())
+
+
+async def handle_version(message):
+    await send_codeblock(message.channel, bot_config.version_report())
+
+
+async def handle_reload(message):
+    bot_config.reload_config()
+    paper_bot.reload_config()
+    await send_codeblock(message.channel, "Config reloaded.\n\n" + bot_config.config_report())
+
+
 async def handle_journal(message):
     rows = paper_bot.read_trade_log(limit=10)
     recent_orders = paper_bot.get_orders("all", 10)
@@ -533,7 +537,7 @@ async def handle_trade(message, args):
         return
 
     symbol = args[0].upper()
-    dollars_text = args[1] if len(args) >= 2 else "5"
+    dollars_text = args[1] if len(args) >= 2 else str(paper_bot.MAX_DOLLARS_PER_TRADE)
 
     try:
         dollars = float(dollars_text)
@@ -623,6 +627,9 @@ def help_text():
 !brief - show short bot report
 !pnl - show experiment P/L summary
 !risk - show active stop-loss and take-profit alert settings
+!config - show bot_config.json settings
+!version - show deployed GitHub commit
+!reload - reload bot_config.json without a full service restart
 !journal - show local trade log and recent Alpaca orders
 !recap - show daily recap style report
 !suggest - show next recommended action
@@ -636,11 +643,33 @@ def help_text():
 
 Safety:
 - Paper trading only
-- Max $5 per trade
-- One open order max
-- One bot-submitted order per day
+- Max trade size comes from bot_config.json
+- One open order max unless bot_config.json says otherwise
+- One bot-submitted order per day unless bot_config.json says otherwise
 - Only the allowed Discord user can control it
 """
+
+
+async def send_startup_notice(client):
+    if not bot_config.startup_notice_enabled():
+        return
+
+    channel_id = report_channel_id()
+    if channel_id is None:
+        return
+
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        return
+
+    lines = [
+        "AI Paper Trader online",
+        f"Version: {bot_config.git_commit_short()}",
+        f"Stop-loss alert: {stop_loss_percent():g}%",
+        f"Take-profit alert: {take_profit_percent():g}%",
+        "Config source: bot_config.json",
+    ]
+    await send_codeblock(channel, "\n".join(lines))
 
 
 async def auto_report_loop(client):
@@ -666,6 +695,9 @@ async def auto_report_loop(client):
 
     while not client.is_closed():
         try:
+            bot_config.reload_config()
+            paper_bot.reload_config()
+
             account = paper_bot.get_account()
             clock = paper_bot.get_clock()
             positions = paper_bot.get_positions()
@@ -718,6 +750,9 @@ def make_client(allowed_user_id):
     async def on_ready():
         print(f"Discord bot logged in as {client.user}")
         print("Type !help in your Discord channel.")
+        if not getattr(client, "startup_notice_sent", False):
+            client.startup_notice_sent = True
+            await send_startup_notice(client)
         if not getattr(client, "auto_report_task_started", False):
             client.auto_report_task_started = True
             client.loop.create_task(auto_report_loop(client))
@@ -754,6 +789,12 @@ def make_client(allowed_user_id):
             await handle_pnl(message)
         elif command == "!risk":
             await handle_risk(message)
+        elif command == "!config":
+            await handle_config(message)
+        elif command == "!version":
+            await handle_version(message)
+        elif command == "!reload":
+            await handle_reload(message)
         elif command == "!journal":
             await handle_journal(message)
         elif command == "!recap":
