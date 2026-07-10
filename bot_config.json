@@ -7,6 +7,7 @@
     "startup_notice_enabled": true
   },
   "risk": {
+    "automatic_exits_enabled": false,
     "mode": "alert_only",
     "stop_loss_pct": 0.25,
     "take_profit_pct": 0.25
