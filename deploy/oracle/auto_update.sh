@@ -73,7 +73,7 @@ if ! run_as_app_user "'${PYTHON_BIN}' -m pip install -r requirements.txt >/dev/n
 fi
 
 log "Checking Python files..."
-if ! run_as_app_user "'${PYTHON_BIN}' -m py_compile bot_config.py paper_bot.py trade_exit.py discord_control.py"; then
+if ! run_as_app_user "'${PYTHON_BIN}' -m py_compile bot_config.py paper_bot.py trade_exit.py autonomous_trader.py discord_control.py"; then
   rollback
   exit 1
 fi
