@@ -2,6 +2,10 @@
 trade_log.csv
 daily_report.txt
 auto_report_state.json
+autonomous_state.json
+dashboard_state.json
+deployment_status.json
+.systemd_install_hash
 __pycache__/
 *.pyc
 .venv/
