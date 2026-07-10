@@ -17,8 +17,6 @@ if [ ! -f "${UPDATE_SCRIPT}" ]; then
   exit 1
 fi
 
-chmod +x "${UPDATE_SCRIPT}"
-
 echo "Creating systemd update service..."
 sudo tee "${UPDATE_SERVICE_FILE}" >/dev/null <<SERVICE
 [Unit]
@@ -32,7 +30,7 @@ Environment=APP_DIR=${APP_DIR}
 Environment=APP_USER=${APP_USER}
 Environment=SERVICE_NAME=${SERVICE_NAME}
 Environment=BRANCH=main
-ExecStart=${UPDATE_SCRIPT}
+ExecStart=/usr/bin/bash ${UPDATE_SCRIPT}
 SERVICE
 
 echo "Creating systemd update timer..."
