@@ -79,6 +79,18 @@ sync_systemd_if_needed() {
   chown "${APP_USER}:${APP_USER}" "${SYSTEMD_HASH_FILE}" 2>/dev/null || true
 }
 
+ensure_services() {
+  systemctl_cmd enable ai-paper-trader-auto-update.timer >/dev/null 2>&1 || true
+  systemctl_cmd enable ai-paper-trader-heartbeat.timer >/dev/null 2>&1 || true
+  systemctl_cmd start ai-paper-trader-auto-update.timer
+  systemctl_cmd start ai-paper-trader-heartbeat.timer
+
+  if ! systemctl_cmd is-active --quiet "${SERVICE_NAME}"; then
+    log "Main bot was not active. Restarting it..."
+    systemctl_cmd restart "${SERVICE_NAME}"
+  fi
+}
+
 verify_deployment() {
   systemctl_cmd is-active --quiet "${SERVICE_NAME}"
   systemctl_cmd is-active --quiet ai-paper-trader-auto-update.timer
@@ -146,6 +158,8 @@ if [ "${updated}" = true ]; then
   log "Restarting ${SERVICE_NAME}..."
   systemctl_cmd restart "${SERVICE_NAME}"
 fi
+
+ensure_services
 
 if ! verify_deployment; then
   rollback "${local_sha}"
