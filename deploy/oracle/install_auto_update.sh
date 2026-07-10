@@ -7,8 +7,8 @@ SERVICE_NAME="ai-paper-trader"
 UPDATE_SERVICE_FILE="/etc/systemd/system/ai-paper-trader-auto-update.service"
 UPDATE_TIMER_FILE="/etc/systemd/system/ai-paper-trader-auto-update.timer"
 UPDATE_SCRIPT="${APP_DIR}/deploy/oracle/auto_update.sh"
-HEARTBEAT_SERVICE_FILE="/etc/systemd/system/ai-paper-trader-heartbeat.service"
-HEARTBEAT_TIMER_FILE="/etc/systemd/system/ai-paper-trader-heartbeat.timer"
+DASHBOARD_SERVICE_FILE="/etc/systemd/system/ai-paper-trader-heartbeat.service"
+DASHBOARD_TIMER_FILE="/etc/systemd/system/ai-paper-trader-heartbeat.timer"
 PYTHON_BIN="${APP_DIR}/.venv/bin/python"
 
 if [ ! -x "${PYTHON_BIN}" ]; then
@@ -53,9 +53,9 @@ Persistent=true
 WantedBy=timers.target
 TIMER
 
-sudo tee "${HEARTBEAT_SERVICE_FILE}" >/dev/null <<SERVICE
+sudo tee "${DASHBOARD_SERVICE_FILE}" >/dev/null <<SERVICE
 [Unit]
-Description=Send AI Paper Trader market-hours check-in
+Description=Update persistent AI Paper Trader Discord dashboard
 Wants=network-online.target
 After=network-online.target ai-paper-trader.service
 
@@ -63,16 +63,16 @@ After=network-online.target ai-paper-trader.service
 Type=oneshot
 User=${APP_USER}
 WorkingDirectory=${APP_DIR}
-ExecStart=${PYTHON_BIN} ${APP_DIR}/heartbeat_reporter.py
+ExecStart=${PYTHON_BIN} ${APP_DIR}/dashboard_reporter.py
 SERVICE
 
-sudo tee "${HEARTBEAT_TIMER_FILE}" >/dev/null <<TIMER
+sudo tee "${DASHBOARD_TIMER_FILE}" >/dev/null <<TIMER
 [Unit]
-Description=Send AI Paper Trader check-in every 30 minutes
+Description=Refresh AI Paper Trader Discord dashboard every 5 minutes
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=30min
+OnBootSec=1min
+OnUnitActiveSec=5min
 Persistent=true
 
 [Install]
@@ -82,12 +82,13 @@ TIMER
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai-paper-trader-auto-update.timer
 sudo systemctl enable --now ai-paper-trader-heartbeat.timer
+sudo systemctl restart ai-paper-trader-heartbeat.timer
 
 echo ""
 echo "Done."
 echo "Updater timer:"
 echo "  systemctl list-timers ai-paper-trader-auto-update.timer"
-echo "Heartbeat timer:"
+echo "Dashboard timer:"
 echo "  systemctl list-timers ai-paper-trader-heartbeat.timer"
-echo "Test heartbeat now:"
+echo "Create or refresh dashboard now:"
 echo "  sudo systemctl start ai-paper-trader-heartbeat.service"
