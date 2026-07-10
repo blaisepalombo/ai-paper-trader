@@ -15,6 +15,7 @@ except ImportError:
 
 import bot_config
 import paper_bot
+import trade_exit
 
 
 COMMAND_PREFIX = "!"
@@ -55,30 +56,6 @@ def load_settings():
         print("Type !whoami in Discord, then paste that ID into .env.")
 
     return token, allowed_user_id
-
-
-def auto_reports_enabled():
-    return bot_config.auto_reports_enabled()
-
-
-def daily_recap_enabled():
-    return bot_config.daily_recap_enabled()
-
-
-def auto_analyze_at_open_enabled():
-    return bot_config.auto_analyze_at_open_enabled()
-
-
-def report_interval_seconds():
-    return bot_config.report_interval_seconds()
-
-
-def stop_loss_percent():
-    return bot_config.stop_loss_percent()
-
-
-def take_profit_percent():
-    return bot_config.take_profit_percent()
 
 
 def report_channel_id():
@@ -138,11 +115,8 @@ def get_report():
 
 
 def portfolio_summary(positions):
-    open_value = 0.0
-    open_pl = 0.0
-    for position in positions:
-        open_value += float(position.get("market_value") or 0)
-        open_pl += float(position.get("unrealized_pl") or 0)
+    open_value = sum(float(position.get("market_value") or 0) for position in positions)
+    open_pl = sum(float(position.get("unrealized_pl") or 0) for position in positions)
     return {
         "virtual_capital": paper_bot.VIRTUAL_CAPITAL,
         "open_value": open_value,
@@ -156,15 +130,14 @@ def build_portfolio_summary(positions):
     exposure_pct = 0.0
     if paper_bot.VIRTUAL_CAPITAL:
         exposure_pct = (summary["open_value"] / paper_bot.VIRTUAL_CAPITAL) * 100
-    lines = [
+    return "\n".join([
         "AI Paper Trader Portfolio",
         f"Virtual starting capital: {paper_bot.money(summary['virtual_capital'])}",
         f"Open market value: {paper_bot.money(summary['open_value'])}",
         f"Open unrealized P/L: {paper_bot.money(summary['open_pl'])}",
         f"Estimated experiment value: {paper_bot.money(summary['estimated_value'])}",
         f"Open exposure: {paper_bot.percent(exposure_pct)}",
-    ]
-    return "\n".join(lines)
+    ])
 
 
 def build_short_update(account, clock, positions, open_orders):
@@ -192,7 +165,7 @@ def build_short_update(account, clock, positions, open_orders):
     if open_orders:
         lines.append("Next: wait for the open order.")
     elif positions:
-        lines.append("Next: hold and monitor.")
+        lines.append("Next: hold, monitor, or use !sell SYMBOL.")
     elif not clock.get("is_open"):
         lines.append("Next: wait for market open.")
     else:
@@ -231,14 +204,6 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
         for order in recent_orders[:5]:
             lines.append(f"- {paper_bot.order_label(order)}")
 
-    lines.append("")
-    if open_orders:
-        lines.append("Next: wait for the open order.")
-    elif positions:
-        lines.append("Next: hold and review before adding anything.")
-    else:
-        lines.append("Next: no position is open. Run !analyze during market hours.")
-
     return "\n".join(lines)
 
 
@@ -246,17 +211,19 @@ def build_risk_settings_report(positions=None):
     config = bot_config.get_config(force_reload=True)
     sl_pct = bot_config.stop_loss_percent(config)
     tp_pct = bot_config.take_profit_percent(config)
+    auto_exit = trade_exit.automatic_exits_enabled()
     lines = [
         "AI Paper Trader Risk Settings",
         f"Version: {bot_config.git_commit_short()}",
-        f"Stop-loss alert: {sl_pct:g}% below entry",
-        f"Take-profit alert: {tp_pct:g}% above entry",
-        "Mode: alert-only. The bot will not sell automatically.",
+        f"Stop-loss threshold: {sl_pct:g}% below entry",
+        f"Take-profit threshold: {tp_pct:g}% above entry",
+        f"Automatic exits enabled: {auto_exit}",
+        "Manual selling always requires an approval code.",
     ]
 
     if positions:
         lines.append("")
-        lines.append("Current position alert areas:")
+        lines.append("Current position threshold areas:")
         for position in positions:
             symbol = position.get("symbol", "?")
             avg = float(position.get("avg_entry_price") or 0)
@@ -264,16 +231,9 @@ def build_risk_settings_report(positions=None):
                 continue
             stop_price = avg * (1 - sl_pct / 100)
             target_price = avg * (1 + tp_pct / 100)
-            lines.append(f"- {symbol}: stop area {paper_bot.money(stop_price)}, target area {paper_bot.money(target_price)}")
+            lines.append(f"- {symbol}: stop {paper_bot.money(stop_price)}, target {paper_bot.money(target_price)}")
 
     return "\n".join(lines)
-
-
-def status_fingerprint(clock, positions, open_orders, recent_orders=None):
-    position_bits = [(p.get("symbol"), p.get("qty")) for p in positions]
-    order_bits = [(o.get("id"), o.get("symbol"), o.get("status"), o.get("filled_qty")) for o in open_orders]
-    recent_order_bits = [(o.get("id"), o.get("symbol"), o.get("status"), o.get("filled_qty")) for o in (recent_orders or [])[:10]]
-    return repr((clock.get("is_open"), position_bits, order_bits, recent_order_bits))
 
 
 def order_state(order):
@@ -289,55 +249,9 @@ def order_state(order):
 def current_auto_state(clock, positions, open_orders, recent_orders):
     return {
         "market_open": bool(clock.get("is_open")),
-        "open_order_ids": sorted(str(order.get("id")) for order in open_orders if order.get("id")),
         "position_symbols": sorted(str(position.get("symbol")) for position in positions if position.get("symbol")),
         "recent_orders": {str(order.get("id")): order_state(order) for order in recent_orders[:20] if order.get("id")},
     }
-
-
-def risk_alert_keys(positions):
-    keys = set()
-    sl_pct = stop_loss_percent()
-    tp_pct = take_profit_percent()
-    for position in positions:
-        symbol = position.get("symbol")
-        avg = float(position.get("avg_entry_price") or 0)
-        current = float(position.get("current_price") or 0)
-        if not symbol or avg <= 0 or current <= 0:
-            continue
-        if current <= avg * (1 - sl_pct / 100):
-            keys.add(f"{symbol}:stop")
-        if current >= avg * (1 + tp_pct / 100):
-            keys.add(f"{symbol}:target")
-    return keys
-
-
-def build_risk_alerts(positions, saved_state):
-    previous_keys = set(saved_state.get("risk_alert_keys", []))
-    current_keys = risk_alert_keys(positions)
-    new_keys = current_keys - previous_keys
-    saved_state["risk_alert_keys"] = sorted(current_keys)
-
-    if not new_keys:
-        return None
-
-    sl_pct = stop_loss_percent()
-    tp_pct = take_profit_percent()
-    lines = ["AI Paper Trader Risk Alert"]
-    for position in positions:
-        symbol = position.get("symbol")
-        avg = float(position.get("avg_entry_price") or 0)
-        current = float(position.get("current_price") or 0)
-        if not symbol or avg <= 0 or current <= 0:
-            continue
-        stop_price = avg * (1 - sl_pct / 100)
-        target_price = avg * (1 + tp_pct / 100)
-        if f"{symbol}:stop" in new_keys:
-            lines.append(f"- {symbol} is at or below stop alert: current {paper_bot.money(current)}, stop area {paper_bot.money(stop_price)} ({sl_pct:g}% below entry)")
-        if f"{symbol}:target" in new_keys:
-            lines.append(f"- {symbol} is at or above take-profit alert: current {paper_bot.money(current)}, target area {paper_bot.money(target_price)} ({tp_pct:g}% above entry)")
-    lines.append("Alert only. The bot did not sell or place a new order.")
-    return "\n".join(lines)
 
 
 def build_change_alert(previous, current, account, clock, positions, open_orders, recent_orders):
@@ -367,7 +281,7 @@ def build_change_alert(previous, current, account, clock, positions, open_orders
     for symbol in sorted(current_positions - previous_positions):
         lines.append(f"New open position: {symbol}")
     for symbol in sorted(previous_positions - current_positions):
-        lines.append(f"Position no longer open: {symbol}")
+        lines.append(f"Position closed: {symbol}")
 
     if not lines:
         return None
@@ -377,9 +291,126 @@ def build_change_alert(previous, current, account, clock, positions, open_orders
     return "\n".join(lines)
 
 
+def risk_alert_keys(positions):
+    keys = set()
+    sl_pct = bot_config.stop_loss_percent()
+    tp_pct = bot_config.take_profit_percent()
+    for position in positions:
+        symbol = position.get("symbol")
+        avg = float(position.get("avg_entry_price") or 0)
+        current = float(position.get("current_price") or 0)
+        if not symbol or avg <= 0 or current <= 0:
+            continue
+        if current <= avg * (1 - sl_pct / 100):
+            keys.add(f"{symbol}:stop")
+        if current >= avg * (1 + tp_pct / 100):
+            keys.add(f"{symbol}:target")
+    return keys
+
+
+def build_risk_alerts(positions, saved_state):
+    previous_keys = set(saved_state.get("risk_alert_keys", []))
+    current_keys = risk_alert_keys(positions)
+    new_keys = current_keys - previous_keys
+    saved_state["risk_alert_keys"] = sorted(current_keys)
+    if not new_keys:
+        return None
+
+    sl_pct = bot_config.stop_loss_percent()
+    tp_pct = bot_config.take_profit_percent()
+    lines = ["AI Paper Trader Risk Alert"]
+    for position in positions:
+        symbol = position.get("symbol")
+        avg = float(position.get("avg_entry_price") or 0)
+        current = float(position.get("current_price") or 0)
+        if not symbol or avg <= 0 or current <= 0:
+            continue
+        stop_price = avg * (1 - sl_pct / 100)
+        target_price = avg * (1 + tp_pct / 100)
+        if f"{symbol}:stop" in new_keys:
+            lines.append(f"- {symbol} reached stop threshold: current {paper_bot.money(current)}, stop {paper_bot.money(stop_price)}")
+        if f"{symbol}:target" in new_keys:
+            lines.append(f"- {symbol} reached take-profit threshold: current {paper_bot.money(current)}, target {paper_bot.money(target_price)}")
+    if trade_exit.automatic_exits_enabled():
+        lines.append("Automatic exits are enabled. A paper sell may be submitted.")
+    else:
+        lines.append("Alert only. Automatic exits are disabled.")
+    return "\n".join(lines)
+
+
 async def handle_status(message):
     report, *_ = get_report()
     await send_codeblock(message.channel, report)
+
+
+async def handle_brief(message):
+    account = paper_bot.get_account()
+    clock = paper_bot.get_clock()
+    positions = paper_bot.get_positions()
+    open_orders = paper_bot.get_orders("open")
+    await send_codeblock(message.channel, build_short_update(account, clock, positions, open_orders))
+
+
+async def handle_pnl(message):
+    await send_codeblock(message.channel, build_portfolio_summary(paper_bot.get_positions()))
+
+
+async def handle_positions(message):
+    await send_codeblock(message.channel, trade_exit.position_report())
+
+
+async def handle_risk(message):
+    await send_codeblock(message.channel, build_risk_settings_report(paper_bot.get_positions()))
+
+
+async def handle_config(message):
+    report = bot_config.config_report()
+    report += f"\n- Automatic exits enabled: {trade_exit.automatic_exits_enabled()}"
+    await send_codeblock(message.channel, report)
+
+
+async def handle_version(message):
+    await send_codeblock(message.channel, bot_config.version_report())
+
+
+async def handle_reload(message):
+    bot_config.reload_config()
+    paper_bot.reload_config()
+    await send_codeblock(message.channel, "Config reloaded.\n\n" + bot_config.config_report())
+
+
+async def handle_journal(message):
+    rows = paper_bot.read_trade_log(limit=15)
+    recent_orders = paper_bot.get_orders("all", 15)
+    lines = ["AI Paper Trader Journal"]
+
+    if rows:
+        lines.append("")
+        lines.append("Local trade log:")
+        for row in rows:
+            lines.append(
+                f"- {row.get('timestamp_utc', '?')}: {row.get('symbol', '?')} "
+                f"${row.get('dollars', '?')}, status {row.get('status', '?')}"
+            )
+    else:
+        lines.append("Local trade log: none yet")
+
+    if recent_orders:
+        lines.append("")
+        lines.append("Recent Alpaca orders:")
+        for order in recent_orders:
+            lines.append(f"- {paper_bot.order_label(order)}")
+
+    await send_codeblock(message.channel, "\n".join(lines))
+
+
+async def handle_recap(message):
+    account = paper_bot.get_account()
+    clock = paper_bot.get_clock()
+    positions = paper_bot.get_positions()
+    open_orders = paper_bot.get_orders("open")
+    recent_orders = paper_bot.get_orders("all", 20)
+    await send_codeblock(message.channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
 
 
 async def handle_suggest(message):
@@ -397,89 +428,14 @@ async def handle_analyze(message):
     await send_codeblock(message.channel, analysis)
 
 
-async def handle_brief(message):
-    account = paper_bot.get_account()
-    clock = paper_bot.get_clock()
-    positions = paper_bot.get_positions()
-    open_orders = paper_bot.get_orders("open")
-    await send_codeblock(message.channel, build_short_update(account, clock, positions, open_orders))
-
-
-async def handle_pnl(message):
-    await send_codeblock(message.channel, build_portfolio_summary(paper_bot.get_positions()))
-
-
-async def handle_risk(message):
-    positions = paper_bot.get_positions()
-    await send_codeblock(message.channel, build_risk_settings_report(positions))
-
-
-async def handle_config(message):
-    await send_codeblock(message.channel, bot_config.config_report())
-
-
-async def handle_version(message):
-    await send_codeblock(message.channel, bot_config.version_report())
-
-
-async def handle_reload(message):
-    bot_config.reload_config()
-    paper_bot.reload_config()
-    await send_codeblock(message.channel, "Config reloaded.\n\n" + bot_config.config_report())
-
-
-async def handle_journal(message):
-    rows = paper_bot.read_trade_log(limit=10)
-    recent_orders = paper_bot.get_orders("all", 10)
-
-    lines = ["AI Paper Trader Journal"]
-    if rows:
-        lines.append("")
-        lines.append("Local trade log:")
-        for row in rows:
-            timestamp = row.get("timestamp_utc", "?")
-            symbol = row.get("symbol", "?")
-            dollars = row.get("dollars", "?")
-            status = row.get("status", "?")
-            lines.append(f"- {timestamp}: {symbol} ${dollars}, status {status}")
-    else:
-        lines.append("")
-        lines.append("Local trade log: none yet")
-
-    if recent_orders:
-        lines.append("")
-        lines.append("Recent Alpaca orders:")
-        for order in recent_orders[:10]:
-            lines.append(f"- {paper_bot.order_label(order)}")
-    else:
-        lines.append("")
-        lines.append("Recent Alpaca orders: none")
-
-    await send_codeblock(message.channel, "\n".join(lines))
-
-
-async def handle_recap(message):
-    account = paper_bot.get_account()
-    clock = paper_bot.get_clock()
-    positions = paper_bot.get_positions()
-    open_orders = paper_bot.get_orders("open")
-    recent_orders = paper_bot.get_orders("all", 20)
-    await send_codeblock(message.channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
-
-
-async def handle_channelid(message):
-    await message.channel.send(f"This channel ID is `{message.channel.id}`")
-
-
 async def handle_autotest(message, client):
     channel_id = report_channel_id()
     if channel_id is None:
-        await message.channel.send("No `DISCORD_REPORT_CHANNEL_ID` is set yet. Run `!channelid`, put that number in `.env`, then restart the bot.")
+        await message.channel.send("No DISCORD_REPORT_CHANNEL_ID is configured.")
         return
-
     channel = client.get_channel(channel_id)
     if channel is None:
-        await message.channel.send("I could not find the report channel. Check `DISCORD_REPORT_CHANNEL_ID` and restart the bot.")
+        await message.channel.send("The configured report channel could not be found.")
         return
 
     account = paper_bot.get_account()
@@ -488,7 +444,7 @@ async def handle_autotest(message, client):
     open_orders = paper_bot.get_orders("open")
     recent_orders = paper_bot.get_orders("all", 10)
     await send_codeblock(channel, build_short_update(account, clock, positions, open_orders))
-    if daily_recap_enabled():
+    if bot_config.daily_recap_enabled():
         await send_codeblock(channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
     await message.channel.send("Sent a test auto-report.")
 
@@ -500,49 +456,47 @@ async def handle_cancelorder(message, args):
         return
 
     if args and args[0].lower() == "all":
-        target_orders = open_orders
+        targets = open_orders
     elif args:
         requested = args[0]
-        matching = [o for o in open_orders if str(o.get("id", "")).startswith(requested) or o.get("symbol", "").upper() == requested.upper()]
-        if not matching:
-            await message.channel.send("No matching open order. Use `!status` to see open orders, or `!cancelorder all`.")
+        matches = [
+            order for order in open_orders
+            if str(order.get("id", "")).startswith(requested)
+            or str(order.get("symbol", "")).upper() == requested.upper()
+        ]
+        if not matches:
+            await message.channel.send("No matching open order. Use !status or !cancelorder all.")
             return
-        target_orders = matching[:1]
+        targets = matches[:1]
     else:
-        target_orders = open_orders[:1]
+        targets = open_orders[:1]
 
     lines = ["Cancel order request:"]
-    for order in target_orders:
+    for order in targets:
         order_id = order.get("id")
         symbol = order.get("symbol", "?")
-        if not order_id:
-            lines.append(f"- {symbol}: missing order id, skipped")
-            continue
         try:
             paper_bot.cancel_order(order_id)
             paper_bot.log_trade(symbol, 0, "canceled", f"cancel requested for order_id={order_id}")
             lines.append(f"- Cancel requested for {symbol}: {order_id}")
         except RuntimeError as error:
             lines.append(f"- Could not cancel {symbol}: {error}")
-
-    lines.append("This cancels paper orders only. It does not sell open positions.")
     await send_codeblock(message.channel, "\n".join(lines))
 
 
 async def handle_trade(message, args):
     global pending_trade
 
-    if len(args) < 1:
-        await message.channel.send("Use `!trade SPY 5` to request a tiny paper trade.")
+    if not args:
+        await message.channel.send("Use `!trade SPY 5` to stage a tiny paper buy.")
         return
 
     symbol = args[0].upper()
-    dollars_text = args[1] if len(args) >= 2 else str(paper_bot.MAX_DOLLARS_PER_TRADE)
-
+    dollars_text = args[1] if len(args) > 1 else str(paper_bot.MAX_DOLLARS_PER_TRADE)
     try:
         dollars = float(dollars_text)
     except ValueError:
-        await message.channel.send("Dollar amount must be a number. Example: `!trade SPY 5`")
+        await message.channel.send("Dollar amount must be a number.")
         return
 
     clock = paper_bot.get_clock()
@@ -550,10 +504,10 @@ async def handle_trade(message, args):
     open_orders = paper_bot.get_orders("open")
 
     if symbol not in paper_bot.ALLOWED_SYMBOLS:
-        await message.channel.send(f"`{symbol}` is not allowed yet. Allowed: `{', '.join(sorted(paper_bot.ALLOWED_SYMBOLS))}`")
+        await message.channel.send(f"{symbol} is not allowed. Allowed: {', '.join(sorted(paper_bot.ALLOWED_SYMBOLS))}")
         return
     if dollars <= 0 or dollars > paper_bot.MAX_DOLLARS_PER_TRADE:
-        await message.channel.send(f"Safety stop: max trade is `${paper_bot.MAX_DOLLARS_PER_TRADE:.2f}`.")
+        await message.channel.send(f"Safety stop: max trade is ${paper_bot.MAX_DOLLARS_PER_TRADE:.2f}.")
         return
     if len(positions) >= paper_bot.MAX_OPEN_POSITIONS:
         await message.channel.send("Safety stop: max open positions reached.")
@@ -565,30 +519,38 @@ async def handle_trade(message, args):
         await message.channel.send("Safety stop: the bot already submitted an order today.")
         return
     if not clock.get("is_open"):
-        await message.channel.send("Safety stop: market is closed. Use `!status` to see the next open.")
+        await message.channel.send("Safety stop: market is closed.")
         return
 
     open_order_symbols = {order.get("symbol") for order in open_orders}
     position_symbols = {position.get("symbol") for position in positions}
     if symbol in open_order_symbols or symbol in position_symbols:
-        await message.channel.send(f"Safety stop: `{symbol}` is already open or pending.")
+        await message.channel.send(f"Safety stop: {symbol} is already open or pending.")
         return
 
-    code = f"{symbol}-{int(dollars * 100)}"
-    pending_trade = {"user_id": str(message.author.id), "symbol": symbol, "dollars": dollars, "code": code}
-
+    code = f"BUY-{symbol}-{int(dollars * 100)}"
+    pending_trade = {
+        "user_id": str(message.author.id),
+        "symbol": symbol,
+        "dollars": dollars,
+        "code": code,
+    }
     await message.channel.send(
-        f"Paper trade staged: buy `${dollars:.2f}` of `{symbol}`.\n"
-        f"To submit it, reply exactly: `!approve {code}`\n"
-        "This is Alpaca paper trading only."
+        f"Paper buy staged: `${dollars:.2f}` of `{symbol}`.\n"
+        f"Approve with: `!approve {code}`\n"
+        "This affects Alpaca paper trading only."
     )
 
 
 async def handle_approve(message, args):
     global pending_trade
 
+    handled_exit = await trade_exit.handle_approve(message, args)
+    if handled_exit:
+        return
+
     if pending_trade is None:
-        await message.channel.send("No pending trade. Use `!trade SPY 5` first.")
+        await message.channel.send("No matching pending action. Stage one with !trade, !sell, or !closeall.")
         return
     if str(message.author.id) != pending_trade["user_id"]:
         await message.channel.send("Only the user who staged the trade can approve it.")
@@ -597,86 +559,95 @@ async def handle_approve(message, args):
         await message.channel.send("Approval code does not match.")
         return
 
-    symbol = pending_trade["symbol"]
-    dollars = pending_trade["dollars"]
+    action = pending_trade
     pending_trade = None
-
     try:
-        result = paper_bot.submit_order(symbol, dollars)
+        result = paper_bot.submit_order(action["symbol"], action["dollars"])
         status = result.get("status", "submitted")
         order_id = result.get("id", "unknown")
-        paper_bot.log_trade(symbol, dollars, status, str(result))
-        await message.channel.send(f"Submitted paper order. `{symbol}` `${dollars:.2f}`. Status: `{status}`. Order ID: `{order_id}`")
+        paper_bot.log_trade(action["symbol"], action["dollars"], status, str(result))
+        await message.channel.send(
+            f"Submitted paper buy: `{action['symbol']}` `${action['dollars']:.2f}`. "
+            f"Status: `{status}`. Order ID: `{order_id}`"
+        )
     except RuntimeError as error:
-        paper_bot.log_trade(symbol, dollars, "failed", str(error))
-        await message.channel.send(f"Order failed: `{error}`")
+        paper_bot.log_trade(action["symbol"], action["dollars"], "failed", str(error))
+        await message.channel.send(f"Buy failed: `{error}`")
 
 
 async def handle_cancel(message):
     global pending_trade
+    had_buy = pending_trade is not None
     pending_trade = None
-    await message.channel.send("Pending staged trade canceled.")
+    had_exit = trade_exit.cancel_pending()
+    if had_buy or had_exit:
+        await message.channel.send("Pending staged action canceled.")
+    else:
+        await message.channel.send("There was no pending staged action.")
 
 
 def help_text():
     return """Commands:
 !help - show commands
 !whoami - show your Discord user ID
-!channelid - show this channel's ID for auto reports
-!status - show full bot report
-!brief - show short bot report
-!pnl - show experiment P/L summary
-!risk - show active stop-loss and take-profit alert settings
-!config - show bot_config.json settings
+!channelid - show this channel ID
+!status - full bot report
+!brief - short report
+!pnl - portfolio P/L summary
+!positions - show open positions, quantities, prices, and P/L
+!risk - show stop, target, and automatic-exit status
+!config - show active bot configuration
 !version - show deployed GitHub commit
-!reload - reload bot_config.json without a full service restart
-!journal - show local trade log and recent Alpaca orders
-!recap - show daily recap style report
-!suggest - show next recommended action
-!analyze - score the watchlist and suggest wait/hold/stage trade
-!trade SPY 5 - stage a $5 paper trade
-!approve CODE - approve staged trade
-!cancel - cancel staged trade
-!cancelorder - cancel the newest open Alpaca paper order
-!cancelorder all - cancel all open Alpaca paper orders
-!autotest - send a test auto-report to the configured report channel
+!reload - reload bot_config.json
+!journal - show trade log and recent Alpaca orders
+!recap - show daily recap
+!suggest - show next suggested action
+!analyze - analyze the watchlist
+!trade SPY 5 - stage a $5 paper buy
+!sell SPY - stage a sale of the entire SPY position
+!sell SPY all - same as !sell SPY
+!sell SPY 50% - stage a sale of half the SPY position
+!sell SPY 0.004 - stage an exact-share sale
+!closeall - stage market sells for every open position
+!approve CODE - approve a staged buy, sell, or close-all action
+!cancel - cancel any staged action
+!cancelorder - cancel the newest unfilled paper order
+!cancelorder all - cancel every unfilled paper order
+!autotest - send a test report
 
 Safety:
-- Paper trading only
-- Max trade size comes from bot_config.json
-- One open order max unless bot_config.json says otherwise
-- One bot-submitted order per day unless bot_config.json says otherwise
-- Only the allowed Discord user can control it
+- Alpaca paper trading only
+- Buys, manual sells, and close-all require approval
+- Automatic exits exist but are disabled by default
+- Market orders are blocked while the market is closed
+- Only the allowed Discord user can control the bot
 """
 
 
 async def send_startup_notice(client):
     if not bot_config.startup_notice_enabled():
         return
-
     channel_id = report_channel_id()
     if channel_id is None:
         return
-
     channel = client.get_channel(channel_id)
     if channel is None:
         return
-
-    lines = [
+    await send_codeblock(channel, "\n".join([
         "AI Paper Trader online",
         f"Version: {bot_config.git_commit_short()}",
-        f"Stop-loss alert: {stop_loss_percent():g}%",
-        f"Take-profit alert: {take_profit_percent():g}%",
+        f"Stop-loss threshold: {bot_config.stop_loss_percent():g}%",
+        f"Take-profit threshold: {bot_config.take_profit_percent():g}%",
+        f"Automatic exits enabled: {trade_exit.automatic_exits_enabled()}",
         "Config source: bot_config.json",
-    ]
-    await send_codeblock(channel, "\n".join(lines))
+    ]))
 
 
 async def auto_report_loop(client):
     global last_auto_fingerprint
 
     await client.wait_until_ready()
-    if not auto_reports_enabled():
+    if not bot_config.auto_reports_enabled():
         print("Auto reports disabled.")
         return
 
@@ -684,15 +655,12 @@ async def auto_report_loop(client):
     if channel_id is None:
         print("Auto reports not started: DISCORD_REPORT_CHANNEL_ID is not set.")
         return
-
     channel = client.get_channel(channel_id)
     if channel is None:
         print(f"Auto reports not started: channel {channel_id} was not found.")
         return
 
-    print(f"Auto reports enabled for channel {channel_id}.")
     saved_state = load_auto_state()
-
     while not client.is_closed():
         try:
             bot_config.reload_config()
@@ -704,28 +672,22 @@ async def auto_report_loop(client):
             open_orders = paper_bot.get_orders("open")
             recent_orders = paper_bot.get_orders("all", 20)
             current_state = current_auto_state(clock, positions, open_orders, recent_orders)
-            fingerprint = status_fingerprint(clock, positions, open_orders, recent_orders)
-
-            state_changed = fingerprint != last_auto_fingerprint
+            fingerprint = repr(current_state)
             previous_snapshot = saved_state.get("snapshot", {})
 
-            if state_changed:
+            if fingerprint != last_auto_fingerprint:
                 last_auto_fingerprint = fingerprint
                 alert = build_change_alert(previous_snapshot, current_state, account, clock, positions, open_orders, recent_orders)
                 if alert:
                     await send_codeblock(channel, alert)
 
                 opened_now = previous_snapshot.get("market_open") is False and current_state.get("market_open") is True
-                if opened_now and auto_analyze_at_open_enabled():
-                    try:
-                        analysis = paper_bot.analyze_market(account, clock, positions, open_orders)
-                    except RuntimeError as error:
-                        analysis = f"Auto-analysis failed:\n{error}"
-                    await send_codeblock(channel, analysis)
+                if opened_now and bot_config.auto_analyze_at_open_enabled():
+                    await send_codeblock(channel, paper_bot.analyze_market(account, clock, positions, open_orders))
 
                 closed_now = previous_snapshot.get("market_open") is True and current_state.get("market_open") is False
-                already_sent_today = saved_state.get("last_daily_recap_date") == utc_today()
-                if closed_now and daily_recap_enabled() and not already_sent_today:
+                already_sent = saved_state.get("last_daily_recap_date") == utc_today()
+                if closed_now and bot_config.daily_recap_enabled() and not already_sent:
                     await send_codeblock(channel, build_daily_recap(account, clock, positions, open_orders, recent_orders))
                     saved_state["last_daily_recap_date"] = utc_today()
 
@@ -733,12 +695,14 @@ async def auto_report_loop(client):
             if risk_alert:
                 await send_codeblock(channel, risk_alert)
 
+            await trade_exit.run_automatic_exits(channel, positions, open_orders)
+
             saved_state["snapshot"] = current_state
             save_auto_state(saved_state)
         except Exception as error:
             print(f"Auto report failed: {error}")
 
-        await asyncio.sleep(report_interval_seconds())
+        await asyncio.sleep(bot_config.report_interval_seconds())
 
 
 def make_client(allowed_user_id):
@@ -749,7 +713,6 @@ def make_client(allowed_user_id):
     @client.event
     async def on_ready():
         print(f"Discord bot logged in as {client.user}")
-        print("Type !help in your Discord channel.")
         if not getattr(client, "startup_notice_sent", False):
             client.startup_notice_sent = True
             await send_startup_notice(client)
@@ -772,49 +735,58 @@ def make_client(allowed_user_id):
         if command == "!channelid":
             await message.channel.send(f"This channel ID is `{message.channel.id}`")
             return
-
         if not allowed(message, allowed_user_id):
             await message.channel.send("You are not allowed to control this bot.")
             return
 
-        if command == "!help":
-            await send_codeblock(message.channel, help_text())
-        elif command == "!channelid":
-            await handle_channelid(message)
-        elif command == "!status":
-            await handle_status(message)
-        elif command == "!brief":
-            await handle_brief(message)
-        elif command == "!pnl":
-            await handle_pnl(message)
-        elif command == "!risk":
-            await handle_risk(message)
-        elif command == "!config":
-            await handle_config(message)
-        elif command == "!version":
-            await handle_version(message)
-        elif command == "!reload":
-            await handle_reload(message)
-        elif command == "!journal":
-            await handle_journal(message)
-        elif command == "!recap":
-            await handle_recap(message)
-        elif command == "!suggest":
-            await handle_suggest(message)
-        elif command == "!analyze":
-            await handle_analyze(message)
-        elif command == "!trade":
-            await handle_trade(message, args)
-        elif command == "!approve":
-            await handle_approve(message, args)
-        elif command == "!cancel":
-            await handle_cancel(message)
-        elif command == "!cancelorder":
-            await handle_cancelorder(message, args)
-        elif command == "!autotest":
-            await handle_autotest(message, client)
-        else:
-            await message.channel.send("Unknown command. Try `!help`.")
+        try:
+            if command == "!help":
+                await send_codeblock(message.channel, help_text())
+            elif command == "!status":
+                await handle_status(message)
+            elif command == "!brief":
+                await handle_brief(message)
+            elif command == "!pnl":
+                await handle_pnl(message)
+            elif command == "!positions":
+                await handle_positions(message)
+            elif command == "!risk":
+                await handle_risk(message)
+            elif command == "!config":
+                await handle_config(message)
+            elif command == "!version":
+                await handle_version(message)
+            elif command == "!reload":
+                await handle_reload(message)
+            elif command == "!journal":
+                await handle_journal(message)
+            elif command == "!recap":
+                await handle_recap(message)
+            elif command == "!suggest":
+                await handle_suggest(message)
+            elif command == "!analyze":
+                await handle_analyze(message)
+            elif command == "!trade":
+                await handle_trade(message, args)
+            elif command == "!sell":
+                await trade_exit.handle_sell(message, args)
+            elif command == "!closeall":
+                await trade_exit.handle_closeall(message)
+            elif command == "!approve":
+                await handle_approve(message, args)
+            elif command == "!cancel":
+                await handle_cancel(message)
+            elif command == "!cancelorder":
+                await handle_cancelorder(message, args)
+            elif command == "!autotest":
+                await handle_autotest(message, client)
+            else:
+                await message.channel.send("Unknown command. Try `!help`.")
+        except RuntimeError as error:
+            await message.channel.send(f"Command failed: `{error}`")
+        except Exception as error:
+            print(f"Command error: {error}")
+            await message.channel.send("The command failed unexpectedly. Check the Oracle service logs.")
 
     return client
 
