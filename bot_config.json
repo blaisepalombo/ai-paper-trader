@@ -32,6 +32,8 @@
     "auto_analyze_at_open": true,
     "auto_reports_enabled": true,
     "daily_recap_enabled": true,
+    "market_heartbeat_enabled": true,
+    "market_heartbeat_minutes": 30,
     "report_interval_seconds": 300,
     "startup_notice_enabled": true
   },
