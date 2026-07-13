@@ -1,5 +1,6 @@
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -41,6 +42,7 @@ def load_state():
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         state = default_state()
+
     base = default_state()
     base.update(state if isinstance(state, dict) else {})
     if base.get("date") != today_utc():
@@ -77,19 +79,28 @@ def allowed_watchlist():
     allowed = paper_bot.ALLOWED_SYMBOLS
     if not isinstance(configured, list):
         configured = bot_config.analyze_watchlist()
-    return [str(s).upper() for s in configured if str(s).upper() in allowed]
+    return [str(symbol).upper() for symbol in configured if str(symbol).upper() in allowed]
 
 
-def get_bars(symbol, timeframe="15Min", limit=200):
+def rfc3339(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def get_bars(symbol, timeframe="15Min", limit=1000, lookback_days=14):
+    end = now_utc()
+    start = end - timedelta(days=lookback_days)
     query = urlencode({
         "timeframe": timeframe,
+        "start": rfc3339(start),
+        "end": rfc3339(end),
         "limit": limit,
         "adjustment": "raw",
         "feed": "iex",
         "sort": "asc",
     })
     data = paper_bot.alpaca_data_request("GET", f"/stocks/{symbol}/bars?{query}")
-    return data.get("bars", [])
+    bars = data.get("bars", [])
+    return bars if isinstance(bars, list) else []
 
 
 def sma(values, length):
@@ -102,11 +113,11 @@ def atr(bars, length=14):
     if len(bars) < length + 1:
         return None
     ranges = []
-    for i in range(1, len(bars)):
-        high = float(bars[i].get("h") or 0)
-        low = float(bars[i].get("l") or 0)
-        prev_close = float(bars[i - 1].get("c") or 0)
-        ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    for index in range(1, len(bars)):
+        high = float(bars[index].get("h") or 0)
+        low = float(bars[index].get("l") or 0)
+        previous_close = float(bars[index - 1].get("c") or 0)
+        ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
     if len(ranges) < length:
         return None
     return sum(ranges[-length:]) / length
@@ -123,7 +134,7 @@ def analyze_bars(symbol, bars, spy_return_20=0.0):
     sma50 = sma(closes, 50)
     return_5 = latest / closes[-6] - 1
     return_20 = latest / closes[-21] - 1
-    avg_volume20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 0
+    average_volume20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 0
     recent_high = max(closes[-20:])
     atr14 = atr(bars, 14)
     atr_pct = (atr14 / latest) * 100 if atr14 and latest else 0
@@ -145,7 +156,7 @@ def analyze_bars(symbol, bars, spy_return_20=0.0):
     if symbol == "SPY" or return_20 > spy_return_20:
         score += 1
         reasons.append("relative strength")
-    if avg_volume20 > 0 and volumes[-1] >= avg_volume20 * 0.8:
+    if average_volume20 > 0 and volumes[-1] >= average_volume20 * 0.8:
         score += 1
         reasons.append("volume confirmation")
     if latest >= recent_high * 0.985:
@@ -174,29 +185,57 @@ def scan_candidates():
     if "SPY" not in watchlist:
         watchlist.insert(0, "SPY")
 
-    bars_by_symbol = {symbol: get_bars(symbol) for symbol in watchlist}
-    spy_bars = bars_by_symbol.get("SPY", [])
-    spy_closes = [float(bar.get("c") or 0) for bar in spy_bars]
-    if len(spy_closes) < 55:
-        return False, [], "Not enough SPY data for the market filter."
+    # Use daily bars for the broad-market regime so the filter works even
+    # immediately after the market opens.
+    spy_daily = get_bars("SPY", timeframe="1Day", limit=200, lookback_days=240)
+    spy_daily_closes = [float(bar.get("c") or 0) for bar in spy_daily]
+    if len(spy_daily_closes) < 55:
+        return (
+            False,
+            [],
+            f"Market data unavailable: received {len(spy_daily_closes)} SPY daily bars, need 55. Retrying next scan.",
+        )
 
-    spy_sma20 = sma(spy_closes, 20)
-    spy_sma50 = sma(spy_closes, 50)
-    spy_return20 = spy_closes[-1] / spy_closes[-21] - 1
-    market_healthy = spy_closes[-1] > spy_sma20 and spy_sma20 > spy_sma50
+    spy_daily_sma20 = sma(spy_daily_closes, 20)
+    spy_daily_sma50 = sma(spy_daily_closes, 50)
+    market_healthy = (
+        spy_daily_closes[-1] > spy_daily_sma20
+        and spy_daily_sma20 > spy_daily_sma50
+    )
 
+    bars_by_symbol = {
+        symbol: get_bars(symbol, timeframe="15Min", limit=1000, lookback_days=14)
+        for symbol in watchlist
+    }
+    spy_intraday = bars_by_symbol.get("SPY", [])
+    spy_intraday_closes = [float(bar.get("c") or 0) for bar in spy_intraday]
+    if len(spy_intraday_closes) < 55:
+        return (
+            False,
+            [],
+            f"Market data unavailable: received {len(spy_intraday_closes)} SPY 15-minute bars, need 55. Retrying next scan.",
+        )
+
+    spy_return20 = spy_intraday_closes[-1] / spy_intraday_closes[-21] - 1
     results = []
+    missing = []
     for symbol, bars in bars_by_symbol.items():
         result = analyze_bars(symbol, bars, spy_return20)
         if result:
             results.append(result)
-    results.sort(key=lambda item: (item["score"], item["return_20"], item["return_5"]), reverse=True)
+        else:
+            missing.append(f"{symbol} ({len(bars)} bars)")
 
+    results.sort(key=lambda item: (item["score"], item["return_20"], item["return_5"]), reverse=True)
     regime = (
         f"SPY market filter {'healthy' if market_healthy else 'weak'}: "
-        f"price {paper_bot.money(spy_closes[-1])}, SMA20 {paper_bot.money(spy_sma20)}, "
-        f"SMA50 {paper_bot.money(spy_sma50)}"
+        f"daily close {paper_bot.money(spy_daily_closes[-1])}, "
+        f"daily SMA20 {paper_bot.money(spy_daily_sma20)}, "
+        f"daily SMA50 {paper_bot.money(spy_daily_sma50)}. "
+        f"SPY bars loaded: {len(spy_daily)} daily and {len(spy_intraday)} intraday."
     )
+    if missing:
+        regime += " Missing candidates: " + ", ".join(missing) + "."
     return market_healthy, results, regime
 
 
@@ -228,8 +267,7 @@ def cooldown_active(state):
         last = datetime.fromisoformat(raw)
     except ValueError:
         return False
-    elapsed = (now_utc() - last).total_seconds()
-    return elapsed < cfg_int("cooldown_seconds", 1800, minimum=0)
+    return (now_utc() - last).total_seconds() < cfg_int("cooldown_seconds", 1800, minimum=0)
 
 
 def exposure(positions):
@@ -249,10 +287,10 @@ def update_position_tracking(state, positions):
             continue
         current_symbols.add(symbol)
         current_price = float(position.get("current_price") or 0)
-        avg = float(position.get("avg_entry_price") or 0)
+        average = float(position.get("avg_entry_price") or 0)
         item = tracked.setdefault(symbol, {
             "entry_time": now_utc().isoformat(),
-            "entry_price": avg,
+            "entry_price": average,
             "highest_price": current_price,
         })
         item["highest_price"] = max(float(item.get("highest_price") or 0), current_price)
@@ -266,30 +304,30 @@ def update_position_tracking(state, positions):
 
 def exit_reason(position, tracked):
     symbol = str(position.get("symbol", "")).upper()
-    avg = float(position.get("avg_entry_price") or 0)
+    average = float(position.get("avg_entry_price") or 0)
     current = float(position.get("current_price") or 0)
-    if avg <= 0 or current <= 0:
+    if average <= 0 or current <= 0:
         return None
 
-    bars = get_bars(symbol)
+    bars = get_bars(symbol, timeframe="15Min", limit=1000, lookback_days=14)
     closes = [float(bar.get("c") or 0) for bar in bars]
     atr14 = atr(bars, 14)
     if len(closes) < 25 or not atr14:
         return None
 
-    stop = avg - cfg_float("stop_atr_multiple", 1.25, minimum=0.1) * atr14
-    target = avg + cfg_float("target_atr_multiple", 2.0, minimum=0.1) * atr14
+    stop_price = average - cfg_float("stop_atr_multiple", 1.25, minimum=0.1) * atr14
+    target_price = average + cfg_float("target_atr_multiple", 2.0, minimum=0.1) * atr14
     highest = max(float(tracked.get("highest_price") or current), current)
-    trailing = highest - cfg_float("trailing_atr_multiple", 1.0, minimum=0.1) * atr14
-    trail_armed = highest >= avg + cfg_float("trail_arm_atr_multiple", 1.0, minimum=0.1) * atr14
+    trailing_price = highest - cfg_float("trailing_atr_multiple", 1.0, minimum=0.1) * atr14
+    trail_armed = highest >= average + cfg_float("trail_arm_atr_multiple", 1.0, minimum=0.1) * atr14
     sma20 = sma(closes, 20)
 
-    if current <= stop:
-        return f"ATR stop at {paper_bot.money(stop)}"
-    if current >= target:
-        return f"ATR target at {paper_bot.money(target)}"
-    if trail_armed and current <= trailing:
-        return f"ATR trailing stop at {paper_bot.money(trailing)}"
+    if current <= stop_price:
+        return f"ATR stop at {paper_bot.money(stop_price)}"
+    if current >= target_price:
+        return f"ATR target at {paper_bot.money(target_price)}"
+    if trail_armed and current <= trailing_price:
+        return f"ATR trailing stop at {paper_bot.money(trailing_price)}"
     if sma20 and current < sma20:
         return f"trend reversal below SMA20 {paper_bot.money(sma20)}"
 
@@ -304,18 +342,18 @@ def exit_reason(position, tracked):
 
 
 def record_closed_trade(state, position, reason):
-    avg = float(position.get("avg_entry_price") or 0)
+    average = float(position.get("avg_entry_price") or 0)
     current = float(position.get("current_price") or 0)
-    qty = float(position.get("qty") or 0)
-    realized = (current - avg) * qty
+    quantity = float(position.get("qty") or 0)
+    realized = (current - average) * quantity
     state["realized_pl_today"] = float(state.get("realized_pl_today") or 0) + realized
     trades = state.setdefault("closed_trades", [])
     trades.append({
         "time": now_utc().isoformat(),
         "symbol": position.get("symbol"),
-        "entry": avg,
+        "entry": average,
         "exit_estimate": current,
-        "qty": qty,
+        "qty": quantity,
         "estimated_pl": realized,
         "reason": reason,
     })
@@ -338,13 +376,13 @@ def run_exits(state, positions, open_orders):
         reason = exit_reason(position, tracked.get(symbol, {}))
         if not reason:
             continue
-        qty = float(position.get("qty") or 0)
-        result = trade_exit.submit_sell_order(symbol, qty)
+        quantity = float(position.get("qty") or 0)
+        result = trade_exit.submit_sell_order(symbol, quantity)
         order_id = result.get("id", "unknown")
         status = result.get("status", "submitted")
         record_closed_trade(state, position, reason)
-        paper_bot.log_trade(symbol, 0, status, f"autonomous exit: {reason}; qty={qty:g}; order_id={order_id}")
-        events.append(f"AUTO SELL {symbol}: {qty:g} shares because {reason}. Status {status}, order {order_id}")
+        paper_bot.log_trade(symbol, 0, status, f"autonomous exit: {reason}; qty={quantity:g}; order_id={order_id}")
+        events.append(f"AUTO SELL {symbol}: {quantity:g} shares because {reason}. Status {status}, order {order_id}")
     return events
 
 
@@ -367,14 +405,9 @@ def entry_allowed(state, positions, open_orders, account, clock):
         return False, "Automation stopped by repeated-error protection."
     if exposure(positions) >= cfg_float("max_total_exposure", 20.0, minimum=1):
         return False, "Maximum total exposure reached."
-    if "paper-api.alpaca.markets" not in os_base_url():
+    if "paper-api.alpaca.markets" not in os.environ.get("APCA_API_BASE_URL", ""):
         return False, "Paper-only safety check failed."
     return True, "Entry checks passed."
-
-
-def os_base_url():
-    import os
-    return os.environ.get("APCA_API_BASE_URL", "")
 
 
 def run_entry(state, positions, open_orders, account, clock):
@@ -385,7 +418,7 @@ def run_entry(state, positions, open_orders, account, clock):
 
     market_healthy, candidates, regime = scan_candidates()
     if not market_healthy:
-        state["last_decision"] = regime + ". No entry."
+        state["last_decision"] = regime + " No entry."
         return []
 
     held = {str(position.get("symbol", "")).upper() for position in positions}
@@ -396,8 +429,8 @@ def run_entry(state, positions, open_orders, account, clock):
     if not qualified:
         best = candidates[0] if candidates else None
         state["last_decision"] = (
-            f"No entry. Best score was {best['symbol']} {best['score']}/8."
-            if best else "No eligible candidates."
+            f"No entry. Best score was {best['symbol']} {best['score']}/8. {regime}"
+            if best else f"No eligible candidates. {regime}"
         )
         return []
 
@@ -465,9 +498,9 @@ def status_report():
     for position in positions:
         symbol = position.get("symbol", "?")
         value = paper_bot.money(position.get("market_value"))
-        pl = paper_bot.money(position.get("unrealized_pl"))
-        plpc = paper_bot.percent(float(position.get("unrealized_plpc") or 0) * 100)
-        lines.append(f"- {symbol}: value {value}, P/L {pl} ({plpc})")
+        profit = paper_bot.money(position.get("unrealized_pl"))
+        profit_pct = paper_bot.percent(float(position.get("unrealized_plpc") or 0) * 100)
+        lines.append(f"- {symbol}: value {value}, P/L {profit} ({profit_pct})")
     return "\n".join(lines)
 
 
@@ -481,8 +514,8 @@ def summary_report():
     positions = paper_bot.get_positions()
     unrealized = sum(float(position.get("unrealized_pl") or 0) for position in positions)
     estimated_value = bot_config.virtual_capital() + total + unrealized
-    simulated_slippage_bps = cfg_float("simulated_slippage_bps", 5.0, minimum=0)
-    approximate_slippage = len(closed) * 2 * cfg_float("position_size", 10.0) * simulated_slippage_bps / 10000
+    slippage_bps = cfg_float("simulated_slippage_bps", 5.0, minimum=0)
+    approximate_slippage = len(closed) * 2 * cfg_float("position_size", 10.0) * slippage_bps / 10000
 
     lines = [
         "AI Paper Trader Summary",
@@ -500,9 +533,7 @@ def summary_report():
         lines.append("")
         lines.append("Recent closed trades:")
         for trade in closed[-5:]:
-            lines.append(
-                f"- {trade.get('symbol')}: {paper_bot.money(trade.get('estimated_pl'))}, {trade.get('reason')}"
-            )
+            lines.append(f"- {trade.get('symbol')}: {paper_bot.money(trade.get('estimated_pl'))}, {trade.get('reason')}")
     return "\n".join(lines)
 
 
@@ -518,11 +549,11 @@ def panic_close():
     events = []
     for position in positions:
         symbol = str(position.get("symbol", "")).upper()
-        qty = float(position.get("qty") or 0)
-        if not symbol or qty <= 0:
+        quantity = float(position.get("qty") or 0)
+        if not symbol or quantity <= 0:
             continue
-        result = trade_exit.submit_sell_order(symbol, qty)
-        events.append(f"PANIC SELL {symbol}: {qty:g} shares, status {result.get('status', 'submitted')}")
+        result = trade_exit.submit_sell_order(symbol, quantity)
+        events.append(f"PANIC SELL {symbol}: {quantity:g} shares, status {result.get('status', 'submitted')}")
     if not events:
         events.append("Automation stopped. There were no open positions.")
     return events
