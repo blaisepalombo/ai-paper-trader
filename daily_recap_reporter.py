@@ -43,7 +43,9 @@ def load_runtime_settings():
 
 
 def recap_enabled():
-    return bot_config.daily_recap_enabled()
+    config = bot_config.get_config(force_reload=True)
+    value = bot_config.get_path(config, "reports", "concise_daily_recap_enabled", default=True)
+    return bot_config.as_bool(value, True)
 
 
 def send_message(token, channel_id, content):
