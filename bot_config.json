@@ -3,7 +3,7 @@
     "cooldown_seconds": 1800,
     "daily_loss_limit": 5.0,
     "max_atr_pct": 5.0,
-    "max_consecutive_errors": 3,
+    "max_consecutive_errors": 6,
     "max_hold_minutes": 780,
     "max_positions": 2,
     "max_total_exposure": 20.0,
@@ -27,6 +27,15 @@
       "META",
       "TSLA"
     ]
+  },
+  "network": {
+    "get_retry_attempts": 3,
+    "get_retry_backoff_seconds": [
+      2,
+      5,
+      10
+    ],
+    "request_timeout_seconds": 30
   },
   "reports": {
     "auto_analyze_at_open": true,
