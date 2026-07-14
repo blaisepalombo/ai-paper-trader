@@ -40,7 +40,8 @@
   "reports": {
     "auto_analyze_at_open": true,
     "auto_reports_enabled": true,
-    "daily_recap_enabled": true,
+    "concise_daily_recap_enabled": true,
+    "daily_recap_enabled": false,
     "dashboard_enabled": true,
     "dashboard_pin_enabled": true,
     "dashboard_refresh_minutes": 5,
