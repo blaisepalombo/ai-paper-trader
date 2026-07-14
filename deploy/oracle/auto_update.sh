@@ -82,8 +82,10 @@ sync_systemd_if_needed() {
 ensure_services() {
   systemctl_cmd enable ai-paper-trader-auto-update.timer >/dev/null 2>&1 || true
   systemctl_cmd enable ai-paper-trader-heartbeat.timer >/dev/null 2>&1 || true
+  systemctl_cmd enable ai-paper-trader-daily-recap.timer >/dev/null 2>&1 || true
   systemctl_cmd start ai-paper-trader-auto-update.timer
   systemctl_cmd start ai-paper-trader-heartbeat.timer
+  systemctl_cmd start ai-paper-trader-daily-recap.timer
 
   if ! systemctl_cmd is-active --quiet "${SERVICE_NAME}"; then
     log "Main bot was not active. Restarting it..."
@@ -95,13 +97,18 @@ verify_deployment() {
   systemctl_cmd is-active --quiet "${SERVICE_NAME}"
   systemctl_cmd is-active --quiet ai-paper-trader-auto-update.timer
   systemctl_cmd is-active --quiet ai-paper-trader-heartbeat.timer
+  systemctl_cmd is-active --quiet ai-paper-trader-daily-recap.timer
 
   if [ ! -f "${APP_DIR}/dashboard_reporter.py" ]; then
     log "Missing dashboard_reporter.py"
     return 1
   fi
+  if [ ! -f "${APP_DIR}/daily_recap_reporter.py" ]; then
+    log "Missing daily_recap_reporter.py"
+    return 1
+  fi
 
-  log "Deployment health verified: bot and timers are active."
+  log "Deployment health verified: bot, updater, dashboard, and daily recap are active."
 }
 
 rollback() {
@@ -166,11 +173,11 @@ if ! verify_deployment; then
   exit 1
 fi
 
-# Refresh the persistent Discord dashboard immediately after a successful check.
 systemctl_cmd start ai-paper-trader-heartbeat.service || log "Dashboard refresh failed; timer will retry."
+systemctl_cmd start ai-paper-trader-daily-recap.service || log "Daily recap check failed; timer will retry."
 
 current_sha="$(git_as_app_user rev-parse HEAD)"
-write_status "success" "${current_sha}" "Code, dependencies, bot service, updater timer, and dashboard timer verified"
+write_status "success" "${current_sha}" "Code, dependencies, bot service, updater timer, dashboard timer, and daily recap timer verified"
 
 if [ "${updated}" = true ]; then
   log "Update complete. Deployed ${current_sha}."
