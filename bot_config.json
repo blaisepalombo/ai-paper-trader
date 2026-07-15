@@ -25,7 +25,8 @@
       "NVDA",
       "AMZN",
       "META",
-      "TSLA"
+      "TSLA",
+      "SPCX"
     ]
   },
   "network": {
@@ -64,6 +65,7 @@
       "MSFT",
       "NVDA",
       "QQQ",
+      "SPCX",
       "SPY",
       "TSLA",
       "VOO"
@@ -73,7 +75,8 @@
       "QQQ",
       "AAPL",
       "MSFT",
-      "NVDA"
+      "NVDA",
+      "SPCX"
     ]
   },
   "trading": {
