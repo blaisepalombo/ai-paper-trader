@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import bot_config
 import paper_bot
 import trade_exit
+import trading_database
 
 
 STATE_FILE = Path(__file__).with_name("autonomous_state.json")
@@ -382,6 +383,16 @@ def run_exits(state, positions, open_orders):
         status = result.get("status", "submitted")
         record_closed_trade(state, position, reason)
         paper_bot.log_trade(symbol, 0, status, f"autonomous exit: {reason}; qty={quantity:g}; order_id={order_id}")
+        try:
+            trading_database.log_trade(
+                symbol, "sell", status=status, quantity=quantity,
+                entry_price=float(position.get("avg_entry_price") or 0),
+                exit_price=float(position.get("current_price") or 0),
+                pnl=(float(position.get("current_price") or 0) - float(position.get("avg_entry_price") or 0)) * quantity,
+                reason=reason, order_id=order_id, source="autonomous", details=position,
+            )
+        except Exception as error:
+            print(f"Database exit logging failed: {error}")
         events.append(f"AUTO SELL {symbol}: {quantity:g} shares because {reason}. Status {status}, order {order_id}")
     return events
 
@@ -410,6 +421,23 @@ def entry_allowed(state, positions, open_orders, account, clock):
     return True, "Entry checks passed."
 
 
+def log_scan_decisions(candidates, market_healthy, selected_symbol=None, minimum_score=6):
+    """Persist each eligible scan result without allowing DB errors to stop trading."""
+    for item in candidates:
+        selected = item.get("symbol") == selected_symbol
+        action = "BUY" if selected else "PASS"
+        if selected:
+            reason = "Selected as the highest-ranked qualified candidate."
+        elif item.get("score", 0) < minimum_score:
+            reason = f"Score {item.get('score', 0)}/8 was below minimum {minimum_score}/8."
+        else:
+            reason = "Qualified, but another candidate ranked higher or position limits applied."
+        try:
+            trading_database.log_decision(item, action, reason, market_healthy)
+        except Exception as error:
+            print(f"Database decision logging failed for {item.get('symbol')}: {error}")
+
+
 def run_entry(state, positions, open_orders, account, clock):
     allowed, reason = entry_allowed(state, positions, open_orders, account, clock)
     if not allowed:
@@ -427,6 +455,7 @@ def run_entry(state, positions, open_orders, account, clock):
     minimum_score = cfg_int("minimum_entry_score", 6, minimum=1, maximum=8)
     qualified = [item for item in candidates if item["score"] >= minimum_score]
     if not qualified:
+        log_scan_decisions(candidates, market_healthy, minimum_score=minimum_score)
         best = candidates[0] if candidates else None
         state["last_decision"] = (
             f"No entry. Best score was {best['symbol']} {best['score']}/8. {regime}"
@@ -435,6 +464,7 @@ def run_entry(state, positions, open_orders, account, clock):
         return []
 
     best = qualified[0]
+    log_scan_decisions(candidates, market_healthy, selected_symbol=best["symbol"], minimum_score=minimum_score)
     remaining_exposure = cfg_float("max_total_exposure", 20.0, minimum=1) - exposure(positions)
     dollars = min(cfg_float("position_size", 10.0, minimum=0.01), remaining_exposure)
     dollars = round(max(0, dollars), 2)
@@ -452,6 +482,14 @@ def run_entry(state, positions, open_orders, account, clock):
         + ", ".join(best["reasons"])
     )
     paper_bot.log_trade(best["symbol"], dollars, status, f"autonomous entry score={best['score']}; order_id={order_id}; {best}")
+    try:
+        trading_database.log_trade(
+            best["symbol"], "buy", status=status, dollars=dollars,
+            entry_price=best.get("latest"), reason=f"score {best['score']}/8",
+            order_id=order_id, source="autonomous", details=best,
+        )
+    except Exception as error:
+        print(f"Database entry logging failed: {error}")
     return [f"AUTO BUY {best['symbol']}: ${dollars:.2f}, score {best['score']}/8. Status {status}, order {order_id}"]
 
 
@@ -469,6 +507,10 @@ def run_cycle():
         events.extend(run_exits(state, positions, open_orders))
         if not events:
             events.extend(run_entry(state, positions, open_orders, account, clock))
+        try:
+            trading_database.upsert_daily_stats(account, positions, state)
+        except Exception as error:
+            print(f"Database daily stats logging failed: {error}")
         state["consecutive_errors"] = 0
     except Exception as error:
         state["consecutive_errors"] = int(state.get("consecutive_errors") or 0) + 1

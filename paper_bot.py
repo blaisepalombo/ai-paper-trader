@@ -9,6 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import bot_config
+import trading_database
 
 
 LOG_FILE = Path("trade_log.csv")
@@ -36,6 +37,10 @@ def reload_config():
 
 
 reload_config()
+try:
+    trading_database.initialize()
+except Exception as error:
+    print(f"Database initialization warning: {error}")
 
 
 def load_env(path=".env"):

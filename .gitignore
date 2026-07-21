@@ -10,3 +10,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Local SQLite files (production DB lives outside the repo)
+*.db
+*.db-wal
+*.db-shm

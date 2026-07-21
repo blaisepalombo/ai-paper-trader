@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
 
+from discord import message
+
 try:
     import discord
 except ImportError:
@@ -17,6 +19,7 @@ import autonomous_trader
 import bot_config
 import paper_bot
 import trade_exit
+import trading_database
 
 
 COMMAND_PREFIX = "!"
@@ -299,6 +302,24 @@ async def handle_reload(message):
     await send_codeblock(message.channel, "Configuration reloaded.")
 
 
+async def handle_stats(message):
+    trades, decisions = trading_database.stats_summary(days=30)
+    closed = int(trades.get("wins") or 0) + int(trades.get("losses") or 0)
+    win_rate = (int(trades.get("wins") or 0) / closed * 100) if closed else 0
+    lines = [
+        "AI Paper Trader Database Stats - Last 30 Days",
+        f"Database: {trading_database.database_path()}",
+        f"Decisions recorded: {int(decisions.get('decisions') or 0)}",
+        f"Buy decisions: {int(decisions.get('buy_decisions') or 0)}",
+        f"Pass decisions: {int(decisions.get('passes') or 0)}",
+        f"Trade events recorded: {int(trades.get('trade_events') or 0)}",
+        f"Closed wins / losses: {int(trades.get('wins') or 0)} / {int(trades.get('losses') or 0)}",
+        f"Win rate: {win_rate:.1f}%",
+        f"Recorded net P/L: {paper_bot.money(trades.get('net_pnl'))}",
+    ]
+    await send_codeblock(message.channel, "\n".join(lines))
+
+
 async def handle_journal(message):
     rows = paper_bot.read_trade_log(limit=15)
     recent_orders = paper_bot.get_orders("all", 15)
@@ -467,6 +488,7 @@ def simple_help():
 !stop - stop new autonomous entries
 !status - show what the bot is doing
 !summary - show results and P/L
+!stats - show SQLite memory stats
 !panic - stop automation and close all positions during market hours
 !help advanced - show every manual and diagnostic command
 
@@ -484,6 +506,7 @@ def advanced_help():
 !config - tracked configuration
 !version - deployed GitHub commit
 !reload - reload configuration
+!stats - SQLite decision and trade stats
 !journal - local log and recent orders
 !recap - daily recap
 !suggest or !analyze - scan current candidates
@@ -628,6 +651,8 @@ def make_client(allowed_user_id):
                 await handle_version(message)
             elif command == "!reload":
                 await handle_reload(message)
+            elif command == "!stats":
+                await handle_stats(message)    
             elif command == "!journal":
                 await handle_journal(message)
             elif command == "!recap":

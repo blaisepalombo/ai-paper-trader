@@ -276,3 +276,18 @@ What changed:
 - The bot sends stop-loss and take-profit alerts based on `.env` percentages.
 
 These risk alerts do not sell anything automatically. They are notification-only.
+
+
+## SQLite trading memory
+
+The bot automatically creates a durable SQLite database at:
+
+```text
+~/ai-paper-trader-data/trading_bot.db
+```
+
+This location is outside the Git repository, so auto-deploys do not erase it.
+Set `TRADING_DB_PATH` to use a different location. The database stores scan
+decisions, trade events, and a daily account snapshot. Use `!stats` in Discord
+to confirm that records are being collected. SQLite is built into Python, so no
+extra package or database server is required.
