@@ -327,7 +327,8 @@ async def handle_backtest(message, args):
         f"Running daily backtest for `{symbol or 'configured watchlist'}` over about `{days}` calendar days. This can take a minute."
     )
     try:
-        result = await asyncio.to_thread(backtester.run_backtest, symbol, days)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, backtester.run_backtest, symbol, days)
         await send_codeblock(message.channel, backtester.format_result(result))
     except Exception as error:
         await message.channel.send(f"Backtest failed: `{error}`")
