@@ -17,6 +17,7 @@ except ImportError:
 
 import autonomous_trader
 import backtester
+import optimizer
 import bot_config
 import paper_bot
 import trade_exit
@@ -334,6 +335,31 @@ async def handle_backtest(message, args):
         await message.channel.send(f"Backtest failed: `{error}`")
 
 
+async def handle_optimize(message, args):
+    if args and args[0].lower() == "results":
+        await send_codeblock(message.channel, optimizer.format_result(trading_database.latest_optimizer_result()))
+        return
+
+    days = 730
+    if args:
+        try:
+            days = int(args[0])
+        except ValueError:
+            await message.channel.send("Use `!optimize`, `!optimize 730`, or `!optimize results`.")
+            return
+    days = max(365, min(days, 1500))
+    await message.channel.send(
+        f"Running train/validation optimization over about `{days}` calendar days. "
+        "This tests hundreds of configurations and may take several minutes."
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, optimizer.run_optimization, days)
+        await send_codeblock(message.channel, optimizer.format_result(result))
+    except Exception as error:
+        await message.channel.send(f"Optimization failed: `{error}`")
+
+
 async def handle_stats(message):
     trades, decisions = trading_database.stats_summary(days=30)
     closed = int(trades.get("wins") or 0) + int(trades.get("losses") or 0)
@@ -522,6 +548,7 @@ def simple_help():
 !summary - show results and P/L
 !stats - show SQLite memory stats
 !backtest - test the current strategy on daily historical bars
+!optimize - train and validate strategy settings
 !panic - stop automation and close all positions during market hours
 !help advanced - show every manual and diagnostic command
 
@@ -543,6 +570,9 @@ def advanced_help():
 !backtest - test configured watchlist for 365 days
 !backtest SPY 365 - test one symbol
 !backtest results - show latest saved result
+!optimize - test parameter combinations over 730 days
+!optimize 1095 - choose a longer history
+!optimize results - show latest optimization
 !journal - local log and recent orders
 !recap - daily recap
 !suggest or !analyze - scan current candidates
@@ -691,6 +721,8 @@ def make_client(allowed_user_id):
                 await handle_stats(message)
             elif command == "!backtest":
                 await handle_backtest(message, args)
+            elif command == "!optimize":
+                await handle_optimize(message, args)
             elif command == "!journal":
                 await handle_journal(message)
             elif command == "!recap":

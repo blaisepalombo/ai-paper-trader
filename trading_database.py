@@ -141,6 +141,27 @@ def initialize():
 
             CREATE INDEX IF NOT EXISTS idx_backtest_runs_time
                 ON backtest_runs(timestamp_utc);
+
+            CREATE TABLE IF NOT EXISTS optimizer_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                days_requested INTEGER NOT NULL,
+                combinations_tested INTEGER NOT NULL,
+                train_start TEXT,
+                train_end TEXT,
+                validation_start TEXT,
+                validation_end TEXT,
+                best_parameters_json TEXT,
+                training_net_pnl REAL,
+                training_profit_factor REAL,
+                validation_net_pnl REAL,
+                validation_profit_factor REAL,
+                validation_passed INTEGER NOT NULL DEFAULT 0,
+                details_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_optimizer_runs_time
+                ON optimizer_runs(timestamp_utc);
             """
         )
     return database_path()
@@ -307,6 +328,50 @@ def latest_backtest_result():
     with connection() as conn:
         row = conn.execute(
             "SELECT id, details_json FROM backtest_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        result = json.loads(row["details_json"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    result["run_id"] = row["id"]
+    return result
+
+
+def save_optimizer_result(result):
+    initialize()
+    best = result.get("best") or {}
+    training = best.get("training") or {}
+    validation = best.get("validation") or {}
+    with connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO optimizer_runs (
+                timestamp_utc, days_requested, combinations_tested, train_start,
+                train_end, validation_start, validation_end, best_parameters_json,
+                training_net_pnl, training_profit_factor, validation_net_pnl,
+                validation_profit_factor, validation_passed, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now_utc(), int(result.get("days_requested") or 730),
+                int(result.get("combinations_tested") or 0), result.get("train_start"),
+                result.get("train_end"), result.get("validation_start"),
+                result.get("validation_end"), _json(best.get("parameters") or {}),
+                training.get("net_pnl"), training.get("profit_factor"),
+                validation.get("net_pnl"), validation.get("profit_factor"),
+                int(bool(best.get("validation_passed"))), _json(result),
+            ),
+        )
+        return cursor.lastrowid
+
+
+def latest_optimizer_result():
+    initialize()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, details_json FROM optimizer_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
     if not row:
         return None
