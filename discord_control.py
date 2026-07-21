@@ -16,6 +16,7 @@ except ImportError:
     sys.exit(1)
 
 import autonomous_trader
+import backtester
 import bot_config
 import paper_bot
 import trade_exit
@@ -302,6 +303,36 @@ async def handle_reload(message):
     await send_codeblock(message.channel, "Configuration reloaded.")
 
 
+async def handle_backtest(message, args):
+    if args and args[0].lower() == "results":
+        await send_codeblock(message.channel, backtester.format_result(trading_database.latest_backtest_result()))
+        return
+
+    symbol = None
+    days = 365
+    if args:
+        first = args[0].upper()
+        if first.isdigit():
+            days = int(first)
+        else:
+            symbol = first
+    if len(args) > 1:
+        try:
+            days = int(args[1])
+        except ValueError:
+            await message.channel.send("Days must be a whole number, such as `!backtest SPY 365`.")
+            return
+    days = max(90, min(days, 1500))
+    await message.channel.send(
+        f"Running daily backtest for `{symbol or 'configured watchlist'}` over about `{days}` calendar days. This can take a minute."
+    )
+    try:
+        result = await asyncio.to_thread(backtester.run_backtest, symbol, days)
+        await send_codeblock(message.channel, backtester.format_result(result))
+    except Exception as error:
+        await message.channel.send(f"Backtest failed: `{error}`")
+
+
 async def handle_stats(message):
     trades, decisions = trading_database.stats_summary(days=30)
     closed = int(trades.get("wins") or 0) + int(trades.get("losses") or 0)
@@ -489,6 +520,7 @@ def simple_help():
 !status - show what the bot is doing
 !summary - show results and P/L
 !stats - show SQLite memory stats
+!backtest - test the current strategy on daily historical bars
 !panic - stop automation and close all positions during market hours
 !help advanced - show every manual and diagnostic command
 
@@ -507,6 +539,9 @@ def advanced_help():
 !version - deployed GitHub commit
 !reload - reload configuration
 !stats - SQLite decision and trade stats
+!backtest - test configured watchlist for 365 days
+!backtest SPY 365 - test one symbol
+!backtest results - show latest saved result
 !journal - local log and recent orders
 !recap - daily recap
 !suggest or !analyze - scan current candidates
@@ -652,7 +687,9 @@ def make_client(allowed_user_id):
             elif command == "!reload":
                 await handle_reload(message)
             elif command == "!stats":
-                await handle_stats(message)    
+                await handle_stats(message)
+            elif command == "!backtest":
+                await handle_backtest(message, args)
             elif command == "!journal":
                 await handle_journal(message)
             elif command == "!recap":

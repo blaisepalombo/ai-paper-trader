@@ -111,6 +111,36 @@ def initialize():
                 maximum_drawdown REAL,
                 details_json TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                requested_symbol TEXT,
+                symbols_json TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                days_requested INTEGER NOT NULL,
+                start_date TEXT,
+                end_date TEXT,
+                starting_capital REAL,
+                ending_equity REAL,
+                net_pnl REAL,
+                return_pct REAL,
+                total_trades INTEGER,
+                wins INTEGER,
+                losses INTEGER,
+                win_rate REAL,
+                average_win REAL,
+                average_loss REAL,
+                profit_factor REAL,
+                maximum_drawdown REAL,
+                maximum_drawdown_pct REAL,
+                spy_buy_hold_pnl REAL,
+                slippage_bps REAL,
+                details_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backtest_runs_time
+                ON backtest_runs(timestamp_utc);
             """
         )
     return database_path()
@@ -239,3 +269,50 @@ def stats_summary(days=30):
             (f"-{int(days)} days",),
         ).fetchone()
     return dict(trade_row), dict(decision_row)
+
+
+def save_backtest_result(result):
+    initialize()
+    with connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO backtest_runs (
+                timestamp_utc, requested_symbol, symbols_json, timeframe,
+                days_requested, start_date, end_date, starting_capital,
+                ending_equity, net_pnl, return_pct, total_trades, wins, losses,
+                win_rate, average_win, average_loss, profit_factor,
+                maximum_drawdown, maximum_drawdown_pct, spy_buy_hold_pnl,
+                slippage_bps, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now_utc(), result.get("requested_symbol"),
+                _json(result.get("symbols") or []), result.get("timeframe", "1Day"),
+                int(result.get("days_requested") or 365), result.get("start_date"),
+                result.get("end_date"), result.get("starting_capital"),
+                result.get("ending_equity"), result.get("net_pnl"),
+                result.get("return_pct"), result.get("total_trades"),
+                result.get("wins"), result.get("losses"), result.get("win_rate"),
+                result.get("average_win"), result.get("average_loss"),
+                result.get("profit_factor"), result.get("maximum_drawdown"),
+                result.get("maximum_drawdown_pct"), result.get("spy_buy_hold_pnl"),
+                result.get("slippage_bps"), _json(result),
+            ),
+        )
+        return cursor.lastrowid
+
+
+def latest_backtest_result():
+    initialize()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, details_json FROM backtest_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        result = json.loads(row["details_json"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    result["run_id"] = row["id"]
+    return result
