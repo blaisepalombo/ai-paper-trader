@@ -18,6 +18,8 @@ except ImportError:
 import autonomous_trader
 import backtester
 import optimizer
+import intraday_backtester
+import intraday_optimizer
 import bot_config
 import paper_bot
 import trade_exit
@@ -305,6 +307,38 @@ async def handle_reload(message):
 
 
 async def handle_backtest(message, args):
+    if args and args[0].lower() == "intraday":
+        rest = args[1:]
+        if rest and rest[0].lower() == "results":
+            await send_codeblock(message.channel, intraday_backtester.format_result(trading_database.latest_intraday_backtest_result()))
+            return
+        symbol = None
+        days = 180
+        if rest:
+            first = rest[0].upper()
+            if first.isdigit():
+                days = int(first)
+            else:
+                symbol = first
+        if len(rest) > 1:
+            try:
+                days = int(rest[1])
+            except ValueError:
+                await message.channel.send("Use `!backtest intraday`, `!backtest intraday SPY 180`, or `!backtest intraday results`.")
+                return
+        days = max(30, min(days, 730))
+        await message.channel.send(
+            f"Running 15-minute backtest for `{symbol or 'configured watchlist'}` over about `{days}` calendar days. "
+            "Historical data is downloaded in batches, so this may take several minutes."
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, intraday_backtester.run_backtest, symbol, days)
+            await send_codeblock(message.channel, intraday_backtester.format_result(result))
+        except Exception as error:
+            await message.channel.send(f"Intraday backtest failed: `{error}`")
+        return
+
     if args and args[0].lower() == "results":
         await send_codeblock(message.channel, backtester.format_result(trading_database.latest_backtest_result()))
         return
@@ -336,6 +370,31 @@ async def handle_backtest(message, args):
 
 
 async def handle_optimize(message, args):
+    if args and args[0].lower() == "intraday":
+        rest = args[1:]
+        if rest and rest[0].lower() == "results":
+            await send_codeblock(message.channel, intraday_optimizer.format_result(trading_database.latest_intraday_optimizer_result()))
+            return
+        days = 180
+        if rest:
+            try:
+                days = int(rest[0])
+            except ValueError:
+                await message.channel.send("Use `!optimize intraday`, `!optimize intraday 365`, or `!optimize intraday results`.")
+                return
+        days = max(90, min(days, 730))
+        await message.channel.send(
+            f"Running 15-minute train/validation optimization over about `{days}` calendar days. "
+            "This downloads batched data and tests 162 configurations, so it may take a while."
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, intraday_optimizer.run_optimization, days)
+            await send_codeblock(message.channel, intraday_optimizer.format_result(result))
+        except Exception as error:
+            await message.channel.send(f"Intraday optimization failed: `{error}`")
+        return
+
     if args and args[0].lower() == "results":
         await send_codeblock(message.channel, optimizer.format_result(trading_database.latest_optimizer_result()))
         return
@@ -548,7 +607,9 @@ def simple_help():
 !summary - show results and P/L
 !stats - show SQLite memory stats
 !backtest - test the current strategy on daily historical bars
-!optimize - train and validate strategy settings
+!backtest intraday - test the actual 15-minute strategy
+!optimize - train and validate daily settings
+!optimize intraday - train and validate 15-minute settings
 !panic - stop automation and close all positions during market hours
 !help advanced - show every manual and diagnostic command
 
@@ -569,10 +630,16 @@ def advanced_help():
 !stats - SQLite decision and trade stats
 !backtest - test configured watchlist for 365 days
 !backtest SPY 365 - test one symbol
-!backtest results - show latest saved result
-!optimize - test parameter combinations over 730 days
+!backtest results - show latest saved daily result
+!backtest intraday - test watchlist on 15-minute bars for 180 days
+!backtest intraday SPY 180 - test one symbol
+!backtest intraday results - latest intraday result
+!optimize - test daily parameter combinations over 730 days
 !optimize 1095 - choose a longer history
-!optimize results - show latest optimization
+!optimize results - show latest daily optimization
+!optimize intraday - walk-forward optimize 15-minute strategy
+!optimize intraday 365 - use a longer period
+!optimize intraday results - latest intraday optimization
 !journal - local log and recent orders
 !recap - daily recap
 !suggest or !analyze - scan current candidates

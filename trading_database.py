@@ -162,6 +162,26 @@ def initialize():
 
             CREATE INDEX IF NOT EXISTS idx_optimizer_runs_time
                 ON optimizer_runs(timestamp_utc);
+
+            CREATE TABLE IF NOT EXISTS intraday_backtest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                days_requested INTEGER NOT NULL,
+                requested_symbol TEXT,
+                net_pnl REAL,
+                profit_factor REAL,
+                maximum_drawdown_pct REAL,
+                details_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS intraday_optimizer_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                days_requested INTEGER NOT NULL,
+                combinations_tested INTEGER NOT NULL,
+                validation_passed INTEGER NOT NULL DEFAULT 0,
+                details_json TEXT NOT NULL
+            );
             """
         )
     return database_path()
@@ -372,6 +392,78 @@ def latest_optimizer_result():
     with connection() as conn:
         row = conn.execute(
             "SELECT id, details_json FROM optimizer_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        result = json.loads(row["details_json"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    result["run_id"] = row["id"]
+    return result
+
+
+def save_intraday_backtest_result(result):
+    initialize()
+    with connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO intraday_backtest_runs (
+                timestamp_utc, days_requested, requested_symbol, net_pnl,
+                profit_factor, maximum_drawdown_pct, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now_utc(), int(result.get("days_requested") or 180),
+                result.get("requested_symbol"), result.get("net_pnl"),
+                result.get("profit_factor"), result.get("maximum_drawdown_pct"),
+                _json(result),
+            ),
+        )
+        return cursor.lastrowid
+
+
+def latest_intraday_backtest_result():
+    initialize()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, details_json FROM intraday_backtest_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        result = json.loads(row["details_json"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    result["run_id"] = row["id"]
+    return result
+
+
+def save_intraday_optimizer_result(result):
+    initialize()
+    best = result.get("best") or {}
+    with connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO intraday_optimizer_runs (
+                timestamp_utc, days_requested, combinations_tested,
+                validation_passed, details_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                now_utc(), int(result.get("days_requested") or 180),
+                int(result.get("combinations_tested") or 0),
+                int(bool(best.get("validation_passed"))), _json(result),
+            ),
+        )
+        return cursor.lastrowid
+
+
+def latest_intraday_optimizer_result():
+    initialize()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, details_json FROM intraday_optimizer_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
     if not row:
         return None
