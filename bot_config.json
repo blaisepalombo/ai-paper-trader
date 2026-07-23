@@ -61,6 +61,8 @@
     "allowed": [
       "AAPL",
       "AMZN",
+      "DIA",
+      "IWM",
       "META",
       "MSFT",
       "NVDA",
@@ -118,5 +120,64 @@
     "fee_bps_per_side": 25.0,
     "slippage_bps_per_side": 8.0,
     "paper_only": true
+  },
+  "edge": {
+    "paper_only": true,
+    "scan_interval_seconds": 900,
+    "stock": {
+      "universe": [
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA"
+      ],
+      "position_size": 30.0,
+      "trend_sma": 200,
+      "momentum_lookbacks": [
+        63,
+        126,
+        252
+      ],
+      "momentum_weights": [
+        0.2,
+        0.3,
+        0.5
+      ],
+      "skip_days": 5,
+      "emergency_stop_pct": 12.0,
+      "history_days": 2200,
+      "slippage_bps_per_side": 5.0
+    },
+    "crypto": {
+      "mode": "aggressive",
+      "universe_balanced": [
+        "BTC/USD",
+        "ETH/USD"
+      ],
+      "universe_aggressive": [
+        "BTC/USD",
+        "ETH/USD",
+        "SOL/USD"
+      ],
+      "position_size_balanced": 10.0,
+      "position_size_aggressive": 15.0,
+      "btc_trend_sma": 200,
+      "asset_trend_sma": 100,
+      "momentum_lookbacks": [
+        30,
+        90,
+        180
+      ],
+      "momentum_weights": [
+        0.2,
+        0.35,
+        0.45
+      ],
+      "skip_days": 3,
+      "emergency_stop_pct": 18.0,
+      "history_days": 1800,
+      "fee_bps_per_side": 25.0,
+      "slippage_bps_per_side": 8.0
+    }
   }
 }
