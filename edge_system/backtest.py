@@ -174,7 +174,8 @@ def run(market="stock", days=1825):
     benchmark_score = common.risk_adjusted_score(benchmark_validation)
     passed = (
         validation["net_pnl"] > 0
-        and validation["total_trades"] >= 1
+        and validation["total_trades"] >= 3
+        and validation["profit_factor"] >= 1.10
         and validation_score > benchmark_score
         and validation["maximum_drawdown_pct"] <= benchmark_validation["maximum_drawdown_pct"] + 0.01
     )
@@ -236,7 +237,7 @@ def format_result(result):
             float(full.get("return_pct") or 0), float(full.get("maximum_drawdown_pct") or 0),
         ),
         "Validation verdict: %s" % ("PASSED" if result.get("passed") else "FAILED"),
-        "Pass rule: positive unseen P/L, at least 1 completed trade, lower/equal drawdown than benchmark, and better return-to-drawdown than benchmark.",
+        "Pass rule: positive unseen P/L, at least 3 completed trades, PF >= 1.10, lower/equal drawdown than benchmark, and better return-to-drawdown than benchmark.",
         "Fixed research-backed rules; no parameter optimization and no live settings changed.",
     ]
     return "\n".join(lines)
