@@ -137,3 +137,11 @@ def resilient_urlopen(request, data=None, timeout=None, *args, **kwargs):
 
 
 urllib.request.urlopen = resilient_urlopen
+
+# Register the optional evidence-strategy Discord extension before the main
+# Discord client defines its event handlers.
+try:
+    from edge_system.discord_patch import install as _install_edge_discord
+    _install_edge_discord()
+except Exception as _edge_patch_error:
+    print("Evidence strategy extension unavailable: %s" % _edge_patch_error)
