@@ -46,7 +46,9 @@ def _simulate(market, raw_bars, settings, universe, start_date, end_date, positi
             if bar:
                 stop_price = position["entry_price"] * (1.0 - emergency_stop_pct / 100.0)
                 if common.number(bar, "l") <= stop_price:
-                    trade = common.close_trade(position, stop_price, current_dt, "emergency stop", cost_rate)
+                    raw_open = common.number(bar, "o")
+                    fill_price = raw_open if 0 < raw_open < stop_price else stop_price
+                    trade = common.close_trade(position, fill_price, current_dt, "emergency stop", cost_rate)
                     trades.append(trade)
                     realized += trade["pnl"]
                     position = None
