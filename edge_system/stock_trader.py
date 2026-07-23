@@ -5,7 +5,7 @@ import paper_bot
 import trade_exit
 import trading_database
 
-from . import common, config, data, signals
+from . import common, config, data, signals, storage
 
 STATE_NAME = "edge_stock_state.json"
 
@@ -128,7 +128,7 @@ def run_cycle():
         else:
             target, candidates, reason = _signal()
             current = str(positions[0].get("symbol", "")).upper() if positions else None
-            trading_database.log_edge_decision("stock", target or "CASH", reason, {"candidates": candidates, "current": current})
+            storage.log_decision("stock", target or "CASH", reason, {"candidates": candidates, "current": current})
             if current == target:
                 state["last_signal_week"] = common.week_key()
                 state["last_decision"] = "Hold %s. %s" % (current, reason)
