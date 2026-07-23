@@ -183,6 +183,13 @@ def initialize():
                 details_json TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS crypto_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_utc TEXT NOT NULL, symbol TEXT NOT NULL, score INTEGER, action TEXT NOT NULL, reason TEXT, market_healthy INTEGER, details_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS crypto_backtest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_utc TEXT NOT NULL, days_requested INTEGER NOT NULL, details_json TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS strategy_lab_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_utc TEXT NOT NULL,
@@ -506,3 +513,28 @@ def latest_strategy_lab_result():
         return None
     result["run_id"] = row["id"]
     return result
+
+
+def log_crypto_decision(result, action, reason, market_healthy=None):
+    initialize()
+    with connection() as conn:
+        conn.execute("INSERT INTO crypto_decisions (timestamp_utc,symbol,score,action,reason,market_healthy,details_json) VALUES (?,?,?,?,?,?,?)",(now_utc(),str(result.get('symbol','')).upper(),result.get('score'),action,reason,None if market_healthy is None else int(bool(market_healthy)),_json(result)))
+
+def crypto_stats_summary(days=30):
+    initialize()
+    with connection() as conn:
+        d=conn.execute("SELECT COUNT(*) decisions,SUM(CASE WHEN action='BUY' THEN 1 ELSE 0 END) buys FROM crypto_decisions WHERE julianday(timestamp_utc)>=julianday('now',?)",(f'-{int(days)} days',)).fetchone()
+        t=conn.execute("SELECT COUNT(*) events,COALESCE(SUM(pnl),0) net_pnl,SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) wins,SUM(CASE WHEN pnl<0 THEN 1 ELSE 0 END) losses FROM trades WHERE source='crypto' AND julianday(timestamp_utc)>=julianday('now',?)",(f'-{int(days)} days',)).fetchone()
+    return dict(d),dict(t)
+
+def save_crypto_backtest_result(result):
+    initialize()
+    with connection() as conn:
+        cur=conn.execute("INSERT INTO crypto_backtest_runs(timestamp_utc,days_requested,details_json) VALUES (?,?,?)",(now_utc(),int(result.get('days') or 365),_json(result)))
+        return cur.lastrowid
+
+def latest_crypto_backtest_result():
+    initialize()
+    with connection() as conn: row=conn.execute("SELECT id,details_json FROM crypto_backtest_runs ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:return None
+    result=json.loads(row['details_json']);result['run_id']=row['id'];return result

@@ -25,6 +25,8 @@ import bot_config
 import paper_bot
 import trade_exit
 import trading_database
+from crypto import trader as crypto_trader
+from crypto import backtester as crypto_backtester
 
 
 COMMAND_PREFIX = "!"
@@ -619,6 +621,36 @@ async def handle_cancel(message):
     await message.channel.send("Pending action canceled." if had_buy or had_exit else "No pending action.")
 
 
+
+def crypto_channel_id():
+    value=os.environ.get("DISCORD_CRYPTO_CHANNEL_ID","").strip()
+    try:return int(value)
+    except (TypeError,ValueError):return None
+
+async def handle_crypto(message,args):
+    if crypto_channel_id() and message.channel.id != crypto_channel_id():
+        await message.channel.send("Use crypto commands in the configured #crypto-bot channel.")
+        return
+    sub=args[0].lower() if args else "status"
+    if sub=="start": crypto_trader.start();out="Crypto paper trading started."
+    elif sub=="stop": crypto_trader.stop();out="New crypto entries stopped; exits remain active."
+    elif sub=="status": out=crypto_trader.status()
+    elif sub=="mode":
+        if len(args)<2: out="Use !crypto mode balanced or !crypto mode aggressive"
+        else: crypto_trader.set_mode(args[1].lower());out=f"Crypto mode changed to {args[1].upper()}. Configuration file updated."
+    elif sub=="panic": out="\n".join(crypto_trader.panic())
+    elif sub=="stats":
+        d,t=trading_database.crypto_stats_summary(30);closed=int(t.get('wins') or 0)+int(t.get('losses') or 0);wr=(int(t.get('wins') or 0)/closed*100) if closed else 0
+        out="\n".join(["AI Paper Trader Crypto Stats - 30 Days",f"Decisions: {int(d.get('decisions') or 0)}",f"Buy decisions: {int(d.get('buys') or 0)}",f"Trade events: {int(t.get('events') or 0)}",f"Closed wins/losses: {int(t.get('wins') or 0)}/{int(t.get('losses') or 0)}",f"Win rate: {wr:.1f}%",f"Net recorded P/L: {paper_bot.money(t.get('net_pnl'))}"])
+    elif sub=="backtest":
+        if len(args)>1 and args[1].lower()=="results": r=trading_database.latest_crypto_backtest_result();out=crypto_backtester.report(r) if r else "No crypto backtest saved yet."
+        else:
+            days=int(args[1]) if len(args)>1 else 365
+            await message.channel.send(f"Running crypto hourly backtest over about {days} days. This may take several minutes.")
+            loop=asyncio.get_event_loop();r=await loop.run_in_executor(None,crypto_backtester.run,days);out=crypto_backtester.report(r)
+    else: out="Crypto commands: !crypto start | stop | status | mode balanced|aggressive | stats | backtest 365 | backtest results | panic"
+    await send_codeblock(message.channel,out)
+
 async def handle_autotest(message, client):
     channel_id = report_channel_id()
     channel = client.get_channel(channel_id) if channel_id else None
@@ -641,6 +673,7 @@ def simple_help():
 !optimize - train and validate daily settings
 !optimize intraday - train and validate 15-minute settings
 !strategies test 365 - compare four established strategy families
+!crypto status - control the separate crypto paper bot
 !panic - stop automation and close all positions during market hours
 !help advanced - show every manual and diagnostic command
 
@@ -710,6 +743,18 @@ async def automation_loop(client):
         await asyncio.sleep(interval)
 
 
+
+async def crypto_automation_loop(client):
+    await client.wait_until_ready()
+    channel_id=crypto_channel_id();channel=client.get_channel(channel_id) if channel_id else None
+    while not client.is_closed():
+        try:
+            events=crypto_trader.run_cycle()
+            if channel:
+                for event in events: await send_codeblock(channel,event)
+        except Exception as error: print(f"Crypto automation loop failed: {error}")
+        await asyncio.sleep(300)
+
 async def report_loop(client):
     global last_auto_fingerprint
     await client.wait_until_ready()
@@ -760,6 +805,7 @@ def make_client(allowed_user_id):
             client.background_tasks_started = True
             client.loop.create_task(automation_loop(client))
             client.loop.create_task(report_loop(client))
+            client.loop.create_task(crypto_automation_loop(client))
         if bot_config.startup_notice_enabled() and not getattr(client, "startup_notice_sent", False):
             client.startup_notice_sent = True
             channel_id = report_channel_id()
@@ -817,6 +863,8 @@ def make_client(allowed_user_id):
                 await handle_version(message)
             elif command == "!reload":
                 await handle_reload(message)
+            elif command == "!crypto":
+                await handle_crypto(message, args)
             elif command == "!stats":
                 await handle_stats(message)
             elif command == "!backtest":

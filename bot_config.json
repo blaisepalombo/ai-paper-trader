@@ -85,5 +85,38 @@
     "max_open_positions": 3,
     "one_bot_order_per_day": true,
     "virtual_capital": 50.0
+  },
+  "crypto": {
+    "enabled": false,
+    "mode": "aggressive",
+    "watchlist": [
+      "BTC/USD",
+      "ETH/USD",
+      "SOL/USD"
+    ],
+    "scan_interval_seconds": 300,
+    "signal_timeframe": "1Hour",
+    "risk_timeframe": "15Min",
+    "history_days": 120,
+    "position_size_balanced": 5.0,
+    "position_size_aggressive": 10.0,
+    "max_positions_balanced": 1,
+    "max_positions_aggressive": 2,
+    "max_entries_24h_balanced": 3,
+    "max_entries_24h_aggressive": 5,
+    "loss_limit_24h_balanced": 1.0,
+    "loss_limit_24h_aggressive": 2.0,
+    "cooldown_minutes_balanced": 30,
+    "cooldown_minutes_aggressive": 15,
+    "minimum_score_balanced": 7,
+    "minimum_score_aggressive": 6,
+    "stop_atr_multiple": 2.0,
+    "target_atr_multiple": 3.5,
+    "trailing_atr_multiple": 1.5,
+    "trail_arm_atr_multiple": 1.5,
+    "max_hold_hours": 72,
+    "fee_bps_per_side": 25.0,
+    "slippage_bps_per_side": 8.0,
+    "paper_only": true
   }
 }
