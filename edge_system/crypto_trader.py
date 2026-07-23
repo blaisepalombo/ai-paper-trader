@@ -4,7 +4,7 @@ import paper_bot
 import trading_database
 from crypto import broker
 
-from . import common, config, data, signals
+from . import common, config, data, signals, storage
 
 STATE_NAME = "edge_crypto_state.json"
 
@@ -126,7 +126,7 @@ def run_cycle():
         else:
             target, candidates, reason = _signal()
             current = broker.normalize(positions[0].get("symbol")) if positions else None
-            trading_database.log_edge_decision("crypto", target or "CASH", reason, {"candidates": candidates, "current": current})
+            storage.log_decision("crypto", target or "CASH", reason, {"candidates": candidates, "current": current})
             if current == target:
                 state["last_signal_week"] = common.week_key()
                 state["last_decision"] = "Hold %s. %s" % (current, reason)
