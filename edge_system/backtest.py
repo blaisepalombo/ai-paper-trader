@@ -3,9 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import bot_config
 import paper_bot
-import trading_database
-
-from . import common, config, data, signals
+from . import common, config, data, signals, storage
 
 
 def _bars_map(bars):
@@ -195,7 +193,7 @@ def run(market="stock", days=1825):
         "benchmark_validation_risk_adjusted_score": benchmark_score,
         "passed": passed,
     }
-    result["run_id"] = trading_database.save_edge_strategy_result(result)
+    result["run_id"] = storage.save_strategy_result(result)
     return result
 
 
