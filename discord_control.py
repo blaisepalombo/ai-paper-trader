@@ -20,6 +20,7 @@ import backtester
 import optimizer
 import intraday_backtester
 import intraday_optimizer
+import strategy_lab
 import bot_config
 import paper_bot
 import trade_exit
@@ -437,6 +438,35 @@ async def handle_stats(message):
     await send_codeblock(message.channel, "\n".join(lines))
 
 
+async def handle_strategies(message, args):
+    if args and args[0].lower() in {"results", "compare"}:
+        await send_codeblock(message.channel, strategy_lab.format_result(trading_database.latest_strategy_lab_result()))
+        return
+    days = 365
+    if args and args[0].lower() == "test" and len(args) > 1:
+        try:
+            days = int(args[1])
+        except ValueError:
+            await message.channel.send("Use `!strategies test 365` or `!strategies results`.")
+            return
+    elif args and args[0].isdigit():
+        days = int(args[0])
+    elif args and args[0].lower() != "test":
+        await message.channel.send("Use `!strategies test 365` or `!strategies results`.")
+        return
+    days = max(90, min(days, 730))
+    await message.channel.send(
+        f"Testing four established 15-minute strategy families over about `{days}` calendar days. "
+        "Data is downloaded once and each strategy is evaluated on unseen validation data, so this may take a while."
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, strategy_lab.run_lab, days)
+        await send_codeblock(message.channel, strategy_lab.format_result(result))
+    except Exception as error:
+        await message.channel.send(f"Strategy lab failed: `{error}`")
+
+
 async def handle_journal(message):
     rows = paper_bot.read_trade_log(limit=15)
     recent_orders = paper_bot.get_orders("all", 15)
@@ -610,6 +640,7 @@ def simple_help():
 !backtest intraday - test the actual 15-minute strategy
 !optimize - train and validate daily settings
 !optimize intraday - train and validate 15-minute settings
+!strategies test 365 - compare four established strategy families
 !panic - stop automation and close all positions during market hours
 !help advanced - show every manual and diagnostic command
 
@@ -640,6 +671,8 @@ def advanced_help():
 !optimize intraday - walk-forward optimize 15-minute strategy
 !optimize intraday 365 - use a longer period
 !optimize intraday results - latest intraday optimization
+!strategies test 365 - compare established strategies
+!strategies results - latest strategy comparison
 !journal - local log and recent orders
 !recap - daily recap
 !suggest or !analyze - scan current candidates
@@ -790,6 +823,8 @@ def make_client(allowed_user_id):
                 await handle_backtest(message, args)
             elif command == "!optimize":
                 await handle_optimize(message, args)
+            elif command == "!strategies":
+                await handle_strategies(message, args)
             elif command == "!journal":
                 await handle_journal(message)
             elif command == "!recap":

@@ -182,6 +182,13 @@ def initialize():
                 validation_passed INTEGER NOT NULL DEFAULT 0,
                 details_json TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS strategy_lab_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_utc TEXT NOT NULL,
+                days_requested INTEGER NOT NULL,
+                details_json TEXT NOT NULL
+            );
             """
         )
     return database_path()
@@ -464,6 +471,32 @@ def latest_intraday_optimizer_result():
     with connection() as conn:
         row = conn.execute(
             "SELECT id, details_json FROM intraday_optimizer_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        result = json.loads(row["details_json"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    result["run_id"] = row["id"]
+    return result
+
+
+def save_strategy_lab_result(result):
+    initialize()
+    with connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO strategy_lab_runs (timestamp_utc, days_requested, details_json) VALUES (?, ?, ?)",
+            (now_utc(), int(result.get("days_requested") or 365), _json(result)),
+        )
+        return cursor.lastrowid
+
+
+def latest_strategy_lab_result():
+    initialize()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id, details_json FROM strategy_lab_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
     if not row:
         return None
