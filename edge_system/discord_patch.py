@@ -10,6 +10,8 @@ import functools
 import os
 
 import bot_config
+import paper_bot
+from crypto import broker as crypto_broker
 from crypto import trader as legacy_crypto_trader
 
 from . import backtest, config, crypto_trader, stock_trader, storage
@@ -121,13 +123,32 @@ async def handle(message):
     trader = stock_trader if market == "stock" else crypto_trader
 
     if action == "start":
-        if market == "stock":
-            import autonomous_trader
-            autonomous_trader.stop()
+        latest = storage.latest_strategy_result(market)
+        if not latest or not latest.get("passed"):
+            output = "Start blocked. Run `!edge test %s 1825`; the latest unseen-data result must PASS first." % market
+        elif market == "stock":
+            stock_positions = [
+                position for position in paper_bot.get_positions()
+                if "/" not in crypto_broker.normalize(position.get("symbol"))
+            ]
+            stock_orders = [
+                order for order in paper_bot.get_orders("open")
+                if "/" not in crypto_broker.normalize(order.get("symbol"))
+            ]
+            if stock_positions or stock_orders:
+                output = "Start blocked. Close existing stock positions and orders before handing control to the evidence engine."
+            else:
+                import autonomous_trader
+                autonomous_trader.stop()
+                trader.start()
+                output = "Evidence stock paper strategy started. The older stock entry engine was stopped."
         else:
-            legacy_crypto_trader.stop()
-        trader.start()
-        output = "Evidence %s paper strategy started. The older %s entry engine was stopped." % (market, market)
+            if crypto_broker.crypto_positions() or crypto_broker.crypto_orders("open"):
+                output = "Start blocked. Close existing crypto positions and orders before handing control to the evidence engine."
+            else:
+                legacy_crypto_trader.stop()
+                trader.start()
+                output = "Evidence crypto paper strategy started. The older crypto entry engine was stopped."
     elif action == "stop":
         trader.stop()
         output = "Evidence %s entries stopped; emergency protection remains active." % market
@@ -177,11 +198,18 @@ def install():
         if coroutine.__name__ == "on_message":
             @functools.wraps(coroutine)
             async def wrapped_message(message):
-                if str(getattr(message, "content", "")).strip().lower().startswith("!edge"):
+                content = str(getattr(message, "content", "")).strip().lower()
+                if content.startswith("!edge"):
                     try:
                         await handle(message)
                     except Exception as error:
                         await message.channel.send("Evidence command failed: `%s`" % error)
+                    return
+                if content == "!start" and stock_trader.load().get("enabled"):
+                    await message.channel.send("The evidence stock engine is running. Stop it with `!edge stock stop` before starting the older engine.")
+                    return
+                if content.startswith("!crypto start") and crypto_trader.load().get("enabled"):
+                    await message.channel.send("The evidence crypto engine is running. Stop it with `!edge crypto stop` before starting the older engine.")
                     return
                 await coroutine(message)
             return original_event(client, wrapped_message)
