@@ -15,6 +15,7 @@ except ImportError:
     print("Missing discord.py. Install requirements first.")
     sys.exit(1)
 
+import ai_news_check
 import autonomous_trader
 import backtester
 import optimizer
@@ -166,6 +167,13 @@ def build_daily_recap(account, clock, positions, open_orders, recent_orders):
         f"Report time UTC: {datetime.now(timezone.utc).isoformat()}",
         autonomous_trader.summary_report(),
     ]
+    try:
+        ai_lines = ai_news_check.recap_lines()
+    except Exception as error:
+        ai_lines = [f"Claude news notes unavailable: {error}"]
+    if ai_lines:
+        lines.append("")
+        lines.extend(ai_lines)
     if recent_orders:
         lines.append("")
         lines.append("Recent orders:")

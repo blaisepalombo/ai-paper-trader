@@ -1,1 +1,2 @@
 discord.py>=2.3.0
+anthropic>=2.7.0; python_version >= "3.10"

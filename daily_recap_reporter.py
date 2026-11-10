@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import ai_news_check
 import autonomous_trader
 import bot_config
 import paper_bot
@@ -108,6 +109,13 @@ def build_recap():
         "",
         takeaway,
     ]
+    try:
+        ai_lines = ai_news_check.recap_lines()
+    except Exception as error:
+        ai_lines = [f"Claude news notes unavailable: {error}"]
+    if ai_lines:
+        lines.append("")
+        lines.extend(ai_lines)
     return "```text\n" + "\n".join(lines) + "\n```"
 
 

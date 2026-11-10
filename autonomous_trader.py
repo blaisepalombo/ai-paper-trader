@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
+import ai_news_check
 import bot_config
 import paper_bot
 import trade_exit
@@ -454,8 +455,25 @@ def run_entry(state, positions, open_orders, account, clock):
     candidates = [item for item in candidates if item["symbol"] not in held and item["symbol"] not in pending]
     minimum_score = cfg_int("minimum_entry_score", 6, minimum=1, maximum=8)
     qualified = [item for item in candidates if item["score"] >= minimum_score]
+    ai_enabled = ai_news_check.is_enabled()
+    ai_held_back = []
+    if ai_enabled and qualified:
+        # A symbol Claude recently vetoed (or whose check failed) is skipped
+        # until the recheck window passes, so we don't pay to ask again every scan.
+        recheck = ai_news_check.settings()["recheck_minutes"]
+        ai_held_back = [item["symbol"] for item in qualified if ai_news_check.recent_block(item["symbol"], recheck)]
+        qualified = [item for item in qualified if item["symbol"] not in ai_held_back]
+        if not qualified:
+            state["last_decision"] = (
+                "No entry. Qualified candidates were recently blocked by the Claude news check: "
+                + ", ".join(ai_held_back) + "."
+            )
+            return []
     if not qualified:
         log_scan_decisions(candidates, market_healthy, minimum_score=minimum_score)
+        news_events = run_news_entry(state, candidates, positions, market_healthy, exclude=held | pending)
+        if news_events is not None:
+            return news_events
         best = candidates[0] if candidates else None
         state["last_decision"] = (
             f"No entry. Best score was {best['symbol']} {best['score']}/8. {regime}"
@@ -472,6 +490,14 @@ def run_entry(state, positions, open_orders, account, clock):
         state["last_decision"] = "Remaining exposure is too small for another position."
         return []
 
+    # Claude news check. It can only block this order; it never changes the
+    # symbol, the size or any limit above. Any error means no trade.
+    ai_review = None
+    if ai_enabled:
+        ai_review = ai_news_check.review_candidate(best, source="autonomous")
+        if not ai_review.get("allowed"):
+            return record_ai_block(state, best, dollars, ai_review, market_healthy)
+
     result = paper_bot.submit_order(best["symbol"], dollars)
     status = result.get("status", "submitted")
     order_id = result.get("id", "unknown")
@@ -481,16 +507,111 @@ def run_entry(state, positions, open_orders, account, clock):
         f"Bought {best['symbol']} for ${dollars:.2f}; score {best['score']}/8. "
         + ", ".join(best["reasons"])
     )
-    paper_bot.log_trade(best["symbol"], dollars, status, f"autonomous entry score={best['score']}; order_id={order_id}; {best}")
+    ai_note = ""
+    if ai_review:
+        ai_note = f" Claude allowed ({ai_review.get('confidence', 0):.0%}): {ai_review.get('reason')}"
+        state["last_decision"] += ai_note
+    paper_bot.log_trade(best["symbol"], dollars, status, f"autonomous entry score={best['score']}; order_id={order_id}; {best}{';' + ai_note if ai_note else ''}")
     try:
+        details = dict(best, ai_review=ai_review) if ai_review else best
         trading_database.log_trade(
             best["symbol"], "buy", status=status, dollars=dollars,
             entry_price=best.get("latest"), reason=f"score {best['score']}/8",
-            order_id=order_id, source="autonomous", details=best,
+            order_id=order_id, source="autonomous", details=details,
         )
     except Exception as error:
         print(f"Database entry logging failed: {error}")
-    return [f"AUTO BUY {best['symbol']}: ${dollars:.2f}, score {best['score']}/8. Status {status}, order {order_id}"]
+    return [f"AUTO BUY {best['symbol']}: ${dollars:.2f}, score {best['score']}/8. Status {status}, order {order_id}{ai_note}"]
+
+
+def news_entries_today(state):
+    if state.get("news_entries_date") != today_utc():
+        return 0
+    return int(state.get("news_entries_today") or 0)
+
+
+def run_news_entry(state, candidates, positions, market_healthy, exclude=()):
+    """Let Claude start a buy from fresh news when the rules found nothing.
+
+    Runs only after entry_allowed() and the SPY market filter have passed, so
+    every existing limit still applies. Claude can only pick from the symbol
+    allowlist, minus anything held or pending; the stock must also pass the
+    bot's own technical filter, Claude's catalyst check and a separate risk
+    check. The size is the normal position size. Returns None when nothing
+    happened so the caller keeps its usual message.
+    """
+    if not ai_news_check.news_entries_enabled():
+        return None
+    config = ai_news_check.settings()
+    if news_entries_today(state) >= config["news_max_entries_per_day"]:
+        return None
+    remaining_exposure = cfg_float("max_total_exposure", 20.0, minimum=1) - exposure(positions)
+    dollars = round(max(0, min(cfg_float("position_size", 10.0, minimum=0.01), remaining_exposure)), 2)
+    if dollars < 1:
+        return None
+    spy = next((item for item in candidates if item["symbol"] == "SPY"), None)
+    if spy is None:
+        state["last_news_scan"] = "News scan skipped: SPY data unavailable for relative strength."
+        return None
+
+    def score_symbol(symbol):
+        bars = get_bars(symbol, timeframe="15Min", limit=1000, lookback_days=14)
+        return analyze_bars(symbol, bars, spy["return_20"])
+
+    scan = ai_news_check.run_news_scan(score_symbol, exclude=exclude)
+    if scan is None:
+        return None
+    pick = scan.get("pick")
+    if pick is None:
+        state["last_news_scan"] = scan.get("note")
+        return None
+
+    symbol = pick["symbol"]
+    # Last guard before any order: the symbol must be allowlisted and not already held or pending.
+    if symbol not in paper_bot.ALLOWED_SYMBOLS or symbol in set(exclude):
+        state["last_news_scan"] = f"News pick {symbol} rejected by the final allowlist/held check."
+        return None
+    note = f"Claude news pick ({scan['confidence']:.0%}): {scan['reason']}"
+    result = paper_bot.submit_order(symbol, dollars)
+    status = result.get("status", "submitted")
+    order_id = result.get("id", "unknown")
+    state["trades_today"] = int(state.get("trades_today") or 0) + 1
+    state["last_trade_at"] = now_utc().isoformat()
+    state["news_entries_today"] = news_entries_today(state) + 1
+    state["news_entries_date"] = today_utc()
+    state["last_decision"] = f"Bought {symbol} for ${dollars:.2f} on news; score {pick['score']}/8. {note}"
+    paper_bot.log_trade(symbol, dollars, status, f"autonomous news entry score={pick['score']}; order_id={order_id}; {note}")
+    try:
+        trading_database.log_trade(
+            symbol, "buy", status=status, dollars=dollars, entry_price=pick.get("latest"),
+            reason=note[:500], order_id=order_id, source="autonomous_news",
+            details=dict(pick, news_scan=scan.get("note"), confidence=scan["confidence"], risk_check=scan.get("risk_check")),
+        )
+        trading_database.log_decision(pick, "NEWS_BUY", note[:500], market_healthy)
+    except Exception as error:
+        print(f"Database news entry logging failed: {error}")
+    return [f"AUTO NEWS BUY {symbol}: ${dollars:.2f}, score {pick['score']}/8. Status {status}, order {order_id}. {note}"]
+
+
+def record_ai_block(state, best, dollars, review, market_healthy):
+    """Log a buy that the Claude news check vetoed or that failed safe."""
+    symbol = best["symbol"]
+    verdict = review.get("verdict")
+    status = "ai_veto" if verdict == "veto" else "ai_check_failed"
+    label = "VETOED" if verdict == "veto" else "SKIPPED (AI check failed)"
+    summary = ai_news_check.describe(review)
+    state["last_decision"] = f"No entry. {symbol} {label} by Claude news check. {summary}"
+    paper_bot.log_trade(symbol, 0, status, f"autonomous entry blocked; would-be ${dollars:.2f}; score={best['score']}; {summary}")
+    try:
+        trading_database.log_trade(
+            symbol, "buy", status=status, dollars=0,
+            entry_price=best.get("latest"), reason=f"{label}: {review.get('reason')}"[:500],
+            source="autonomous_ai", details=dict(best, ai_review=review, would_be_dollars=dollars),
+        )
+        trading_database.log_decision(best, "AI_VETO" if verdict == "veto" else "AI_SKIP", review.get("reason"), market_healthy)
+    except Exception as error:
+        print(f"Database AI veto logging failed: {error}")
+    return [f"AI {label} {symbol}: would have bought ${dollars:.2f}, score {best['score']}/8. {summary}"]
 
 
 def run_cycle():

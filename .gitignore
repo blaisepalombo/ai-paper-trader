@@ -15,3 +15,5 @@ venv/
 *.db
 *.db-wal
 *.db-shm
+ai_review_log.json
+ai_news_scan_state.json
