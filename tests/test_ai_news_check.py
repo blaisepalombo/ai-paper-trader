@@ -519,6 +519,7 @@ class RuleGateTests(Harness):
         self.assertEqual(wait({"timestamp": "2026-11-10T09:41:00-05:00"}), 4)
         self.assertEqual(wait({"timestamp": "2026-11-10T09:45:00-05:00"}), 0)
         self.assertEqual(wait({"timestamp": "2026-11-10T15:59:00-05:00"}), 0)
+        self.assertEqual(wait({"timestamp": "2026-11-10T09:36:00.746245902-05:00"}), 9)  # Alpaca's real nanosecond format
         self.assertEqual(wait({}), 0)  # unreadable clock never blocks
 
     def test_no_entries_right_after_open(self):
