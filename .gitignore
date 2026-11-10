@@ -17,3 +17,5 @@ venv/
 *.db-shm
 ai_review_log.json
 ai_news_scan_state.json
+ai_review_log.json.tmp
+ai_news_scan_state.json.tmp

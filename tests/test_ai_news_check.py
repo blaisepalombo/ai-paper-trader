@@ -28,7 +28,7 @@ def candidate(symbol, score=7):
     return {
         "symbol": symbol, "score": score, "latest": 100.0, "sma20": 99.0, "sma50": 98.0,
         "return_5": 0.01, "return_20": 0.03, "atr": 0.5, "atr_pct": 0.5,
-        "reasons": ["price above SMA20", "SMA20 above SMA50"],
+        "reasons": ["price above SMA20", "SMA20 above SMA50", "usable volatility"],
     }
 
 
@@ -343,6 +343,55 @@ class NewsEntryTests(Harness):
         self.assertEqual(events, [])
         self.assertIn("none passed the technical filter", state["last_news_scan"])
 
+    def test_below_sma20_never_reaches_claude(self):
+        # Would be sold by the SMA20 exit on the very next cycle.
+        self.scores["AAPL"] = dict(candidate("AAPL", 6), latest=98.0, sma20=99.0)
+        state, events = self.run_entry(candidates=WEAK)
+        self.assertEqual(events, [])
+        self.assertIn("none passed the technical filter", state["last_news_scan"])
+
+    def test_too_volatile_never_reaches_claude(self):
+        self.scores["AAPL"] = dict(candidate("AAPL", 6), reasons=["price above SMA20", "SMA20 above SMA50"])
+        state, events = self.run_entry(candidates=WEAK)
+        self.assertEqual(events, [])
+        self.assertIn("none passed the technical filter", state["last_news_scan"])
+
+    def test_chasing_a_spike_never_reaches_claude(self):
+        self.scores["AAPL"] = dict(candidate("AAPL", 7), return_5=0.045)  # +4.5% in 5 bars > 3% cap
+        state, events = self.run_entry(candidates=WEAK)
+        self.assertEqual(events, [])
+        self.assertIn("none passed the technical filter", state["last_news_scan"])
+
+    def test_news_scan_runs_when_rule_picks_were_all_vetoed(self):
+        # NVDA qualifies for the rules but was vetoed recently; the news path should still get a turn.
+        ai_news_check.save_review({
+            "time": ai_news_check.now_utc().isoformat(), "symbol": "NVDA", "source": "autonomous",
+            "allowed": False, "verdict": "veto", "api_called": True,
+        })
+        self.use_client(news_response(("AAPL", "buy", 0.9)), claude_response(ALLOW))
+        state, events = self.run_entry(candidates=[candidate("SPY", 5), candidate("NVDA", 8)])
+        self.submit.assert_called_once_with("AAPL", 10.0)
+        self.assertTrue(events[0].startswith("AUTO NEWS BUY AAPL"))
+
+    def test_holding_spy_does_not_disable_news_buys(self):
+        self.use_client(news_response(("AAPL", "buy", 0.9)), claude_response(ALLOW))
+        state = autonomous_trader.default_state()
+        state["enabled"] = True
+        spy_position = {"symbol": "SPY", "qty": "0.01", "market_value": "5", "current_price": "500", "avg_entry_price": "500"}
+        with mock.patch.object(autonomous_trader, "scan_candidates", return_value=(True, [dict(c) for c in WEAK], "ok")), \
+             mock.patch.object(autonomous_trader.paper_bot, "submit_order", self.submit), \
+             mock.patch.object(autonomous_trader.trading_database, "log_trade", self.db_trade), \
+             mock.patch.object(autonomous_trader.trading_database, "log_decision", self.db_decision), \
+             mock.patch.object(ai_news_check, "make_client", self.make_client):
+            events = autonomous_trader.run_entry(state, [spy_position], [], {}, {"is_open": True})
+        self.submit.assert_called_once_with("AAPL", 10.0)
+        self.assertTrue(events[0].startswith("AUTO NEWS BUY AAPL"))
+
+    def test_review_log_write_is_atomic(self):
+        ai_news_check.save_review({"time": "x", "symbol": "A"})
+        self.assertFalse(ai_news_check.REVIEW_FILE.with_name(ai_news_check.REVIEW_FILE.name + ".tmp").exists())
+        self.assertEqual(len(ai_news_check.load_reviews()), 1)
+
     def test_roundup_stories_are_ignored(self):
         self.news_feed = [story("r1", "AAPL", "MSFT", "NVDA", "AMZN", headline="5 stocks to watch")]
         state, events = self.run_entry(candidates=WEAK)
@@ -439,6 +488,49 @@ class NewsEntryTests(Harness):
             events = autonomous_trader.run_entry(state, [], [], {}, {"is_open": True})
         self.assertEqual(events, [])
         self.submit.assert_not_called()
+
+
+class RuleGateTests(Harness):
+    """The two stricter rule gates (AI off): price above SMA20 and the post-open wait."""
+
+    def setUp(self):
+        super().setUp()
+        self.ai_config["enabled"] = False
+
+    def test_rules_skip_candidates_below_sma20(self):
+        below = dict(candidate("NVDA", 8), latest=98.0, sma20=99.0)
+        state, events = self.run_entry(candidates=[below, candidate("AAPL", 7)])
+        self.submit.assert_called_once_with("AAPL", 10.0)  # NVDA scored higher but sits below SMA20
+
+    def test_sma20_gate_can_be_turned_off(self):
+        below = dict(candidate("NVDA", 8), latest=98.0, sma20=99.0)
+        real_cfg = autonomous_trader.cfg
+
+        def cfg(name, default):
+            return False if name == "require_price_above_sma20" else real_cfg(name, default)
+
+        with mock.patch.object(autonomous_trader, "cfg", side_effect=cfg):
+            self.run_entry(candidates=[below, candidate("AAPL", 7)])
+        self.submit.assert_called_once_with("NVDA", 10.0)
+
+    def test_minutes_until_entries_open(self):
+        wait = autonomous_trader.minutes_until_entries_open
+        self.assertEqual(wait({"timestamp": "2026-11-10T09:30:05.1-05:00"}), 15)
+        self.assertEqual(wait({"timestamp": "2026-11-10T09:41:00-05:00"}), 4)
+        self.assertEqual(wait({"timestamp": "2026-11-10T09:45:00-05:00"}), 0)
+        self.assertEqual(wait({"timestamp": "2026-11-10T15:59:00-05:00"}), 0)
+        self.assertEqual(wait({}), 0)  # unreadable clock never blocks
+
+    def test_no_entries_right_after_open(self):
+        state = autonomous_trader.default_state()
+        state["enabled"] = True
+        with mock.patch.object(autonomous_trader.paper_bot, "submit_order", self.submit):
+            events = autonomous_trader.run_entry(
+                state, [], [], {}, {"is_open": True, "timestamp": "2026-11-10T09:36:00-05:00"},
+            )
+        self.assertEqual(events, [])
+        self.submit.assert_not_called()
+        self.assertTrue(state["last_decision"].startswith("Waiting 9 more minute(s) after the open"))
 
 
 class RealSdkRequestTest(unittest.TestCase):

@@ -34,7 +34,7 @@ DEFAULTS = {
     "max_headlines": 8,
     "news_lookback_hours": 48,
     "effort": "low",
-    "max_tokens": 4000,
+    "max_tokens": 8000,
     "max_checks_per_day": 20,
     "recheck_minutes": 60,
     "refusal_fallback": True,
@@ -50,6 +50,7 @@ DEFAULTS = {
     "news_max_symbols_scored": 10,
     "news_effort": "medium",
     "news_max_entries_per_day": 2,
+    "news_max_chase_pct": 3.0,
 }
 
 NEWS_STATE_FILE = Path(__file__).with_name("ai_news_scan_state.json")
@@ -124,6 +125,7 @@ def settings():
         "news_max_symbols_scored": bot_config.as_int(raw.get("news_max_symbols_scored"), DEFAULTS["news_max_symbols_scored"], 1, 30),
         "news_effort": news_effort if news_effort in VALID_EFFORTS else DEFAULTS["news_effort"],
         "news_max_entries_per_day": bot_config.as_int(raw.get("news_max_entries_per_day"), DEFAULTS["news_max_entries_per_day"], 0, 10),
+        "news_max_chase_pct": bot_config.as_float(raw.get("news_max_chase_pct"), DEFAULTS["news_max_chase_pct"], 0.5, 10.0),
     }
 
 
@@ -143,11 +145,21 @@ def load_reviews():
         return []
 
 
+def write_json_atomic(path, data):
+    """Write JSON so a crash mid-write can never leave a half-written file.
+
+    A corrupt review log would read as empty and silently reset the daily AI budgets.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save_review(review):
     with _review_lock:
         reviews = load_reviews()
         reviews.append(review)
-        REVIEW_FILE.write_text(json.dumps(reviews[-200:], indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(REVIEW_FILE, reviews[-200:])
 
 
 def reviews_today():
@@ -305,24 +317,7 @@ def response_json(response):
 
 def parse_verdict(response):
     """Validate Claude's answer. Raises ValueError on anything unexpected."""
-    stop_reason = getattr(response, "stop_reason", None)
-    if stop_reason == "refusal":
-        details = getattr(response, "stop_details", None)
-        category = getattr(details, "category", None) if details else None
-        raise ValueError(f"Claude refused the request (category: {category}).")
-    if stop_reason != "end_turn":
-        raise ValueError(f"Unexpected stop reason: {stop_reason}.")
-
-    text = next((block.text for block in response.content if getattr(block, "type", None) == "text"), None)
-    if not text:
-        raise ValueError("Claude returned no text.")
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise ValueError(f"Claude returned invalid JSON: {error}") from error
-
-    if not isinstance(data, dict):
-        raise ValueError("Claude output is not an object.")
+    data = response_json(response)
     verdict = data.get("verdict")
     if verdict not in {"allow", "veto"}:
         raise ValueError(f"Invalid verdict: {verdict!r}.")
@@ -357,6 +352,7 @@ def review_candidate(candidate, source="autonomous", client=None, headlines=None
         "source": source,
         "model": config["model"],
         "score": candidate.get("score"),
+        "price": candidate.get("latest"),  # lets us later compare vetoed vs. allowed outcomes
         "allowed": False,
         "verdict": "error",
         "risk_flags": [],
@@ -490,7 +486,7 @@ def load_news_state():
 
 
 def save_news_state(state):
-    NEWS_STATE_FILE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(NEWS_STATE_FILE, state)
 
 
 def news_entries_enabled():
@@ -548,6 +544,28 @@ def build_news_prompt(candidates, items):
         lines.append(json.dumps({k: item[k] for k in ("time", "symbols", "source", "headline", "summary")}, ensure_ascii=False))
     lines += ["</headlines>", "", f"Current time UTC: {now_utc().isoformat(timespec='minutes')}"]
     return "\n".join(lines)
+
+
+def news_technicals_ok(scored, config):
+    """The bot's own technical gate for news buys. Claude never sees a stock that fails it.
+
+    - score at or above news_min_technical_score
+    - price above its SMA20 (otherwise the existing SMA20 exit would sell it next cycle)
+    - ATR inside the bot's usable-volatility band
+    - price rising over the last 5 bars, but not by more than news_max_chase_pct
+      (large-cap news is priced in fast; buying a spike mostly buys the spread)
+    """
+    if not scored:
+        return False
+    latest = float(scored.get("latest") or 0)
+    sma20 = scored.get("sma20")
+    return_5_pct = float(scored.get("return_5") or 0) * 100
+    return (
+        scored.get("score", 0) >= config["news_min_technical_score"]
+        and sma20 is not None and latest > float(sma20)
+        and "usable volatility" in (scored.get("reasons") or [])
+        and 0 < return_5_pct <= config["news_max_chase_pct"]
+    )
 
 
 def run_news_scan(score_fn, exclude=(), client=None):
@@ -615,11 +633,7 @@ def run_news_scan(score_fn, exclude=(), client=None):
             except Exception as error:
                 print(f"News scan scoring failed for {symbol}: {error}")
                 continue
-            if (
-                scored
-                and scored.get("score", 0) >= config["news_min_technical_score"]
-                and float(scored.get("return_5") or 0) > 0
-            ):
+            if news_technicals_ok(scored, config):
                 eligible[symbol] = scored
         if not eligible:
             mark_seen()

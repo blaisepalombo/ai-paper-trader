@@ -398,6 +398,25 @@ def run_exits(state, positions, open_orders):
     return events
 
 
+def minutes_until_entries_open(clock):
+    """Minutes left in the no-new-entries window after the 9:30 ET open (0 when entries are allowed).
+
+    Uses the exchange-local timestamp from Alpaca's clock, so no time-zone database is needed.
+    Exits are never affected. If the timestamp is missing or unreadable, entries are not delayed.
+    """
+    skip = cfg_int("skip_minutes_after_open", 15, minimum=0, maximum=120)
+    if skip <= 0:
+        return 0
+    try:
+        local = datetime.fromisoformat(str(clock.get("timestamp")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0
+    minutes_since_open = (local.hour * 60 + local.minute) - (9 * 60 + 30)
+    if 0 <= minutes_since_open < skip:
+        return skip - minutes_since_open
+    return 0
+
+
 def entry_allowed(state, positions, open_orders, account, clock):
     if not state.get("enabled"):
         return False, "Automation is stopped."
@@ -417,6 +436,9 @@ def entry_allowed(state, positions, open_orders, account, clock):
         return False, "Automation stopped by repeated-error protection."
     if exposure(positions) >= cfg_float("max_total_exposure", 20.0, minimum=1):
         return False, "Maximum total exposure reached."
+    wait = minutes_until_entries_open(clock)
+    if wait > 0:
+        return False, f"Waiting {wait} more minute(s) after the open; spreads are widest right at the bell."
     if "paper-api.alpaca.markets" not in os.environ.get("APCA_API_BASE_URL", ""):
         return False, "Paper-only safety check failed."
     return True, "Entry checks passed."
@@ -452,9 +474,15 @@ def run_entry(state, positions, open_orders, account, clock):
 
     held = {str(position.get("symbol", "")).upper() for position in positions}
     pending = open_order_symbols(open_orders)
+    spy = next((item for item in candidates if item["symbol"] == "SPY"), None)
+    spy_return20 = spy["return_20"] if spy else None
     candidates = [item for item in candidates if item["symbol"] not in held and item["symbol"] not in pending]
     minimum_score = cfg_int("minimum_entry_score", 6, minimum=1, maximum=8)
     qualified = [item for item in candidates if item["score"] >= minimum_score]
+    if cfg_bool("require_price_above_sma20", True):
+        # The SMA20 trend-reversal exit would sell a position below SMA20 on the next cycle,
+        # so buying one only pays the spread twice.
+        qualified = [item for item in qualified if item.get("sma20") and item["latest"] > item["sma20"]]
     ai_enabled = ai_news_check.is_enabled()
     ai_held_back = []
     if ai_enabled and qualified:
@@ -464,6 +492,9 @@ def run_entry(state, positions, open_orders, account, clock):
         ai_held_back = [item["symbol"] for item in qualified if ai_news_check.recent_block(item["symbol"], recheck)]
         qualified = [item for item in qualified if item["symbol"] not in ai_held_back]
         if not qualified:
+            news_events = run_news_entry(state, positions, market_healthy, spy_return20, exclude=held | pending)
+            if news_events is not None:
+                return news_events
             state["last_decision"] = (
                 "No entry. Qualified candidates were recently blocked by the Claude news check: "
                 + ", ".join(ai_held_back) + "."
@@ -471,7 +502,7 @@ def run_entry(state, positions, open_orders, account, clock):
             return []
     if not qualified:
         log_scan_decisions(candidates, market_healthy, minimum_score=minimum_score)
-        news_events = run_news_entry(state, candidates, positions, market_healthy, exclude=held | pending)
+        news_events = run_news_entry(state, positions, market_healthy, spy_return20, exclude=held | pending)
         if news_events is not None:
             return news_events
         best = candidates[0] if candidates else None
@@ -530,7 +561,7 @@ def news_entries_today(state):
     return int(state.get("news_entries_today") or 0)
 
 
-def run_news_entry(state, candidates, positions, market_healthy, exclude=()):
+def run_news_entry(state, positions, market_healthy, spy_return20, exclude=()):
     """Let Claude start a buy from fresh news when the rules found nothing.
 
     Runs only after entry_allowed() and the SPY market filter have passed, so
@@ -549,14 +580,13 @@ def run_news_entry(state, candidates, positions, market_healthy, exclude=()):
     dollars = round(max(0, min(cfg_float("position_size", 10.0, minimum=0.01), remaining_exposure)), 2)
     if dollars < 1:
         return None
-    spy = next((item for item in candidates if item["symbol"] == "SPY"), None)
-    if spy is None:
+    if spy_return20 is None:
         state["last_news_scan"] = "News scan skipped: SPY data unavailable for relative strength."
         return None
 
     def score_symbol(symbol):
         bars = get_bars(symbol, timeframe="15Min", limit=1000, lookback_days=14)
-        return analyze_bars(symbol, bars, spy["return_20"])
+        return analyze_bars(symbol, bars, spy_return20)
 
     scan = ai_news_check.run_news_scan(score_symbol, exclude=exclude)
     if scan is None:
@@ -658,6 +688,17 @@ def status_report():
         f"Last scan: {state.get('last_scan_at') or 'not yet'}",
         f"Last decision: {state.get('last_decision') or 'none'}",
     ]
+    try:
+        ai = ai_news_check.settings()
+        lines.append(
+            f"Claude news check: {'ON' if ai['enabled'] else 'OFF'}; "
+            f"news buys: {'ON' if ai['news_entries_enabled'] else 'OFF'} "
+            f"({news_entries_today(state)}/{ai['news_max_entries_per_day']} today)"
+        )
+        if state.get("last_news_scan"):
+            lines.append(f"Last news scan: {state['last_news_scan']}")
+    except Exception as error:
+        lines.append(f"Claude status unavailable: {error}")
     for position in positions:
         symbol = position.get("symbol", "?")
         value = paper_bot.money(position.get("market_value"))
