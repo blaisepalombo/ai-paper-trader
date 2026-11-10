@@ -273,7 +273,7 @@
     }
   },
   "ai": {
-    "enabled": true,
+    "enabled": false,
     "model": "claude-sonnet-5-5",
     "timeout_seconds": 25,
     "max_headlines": 8,
@@ -283,7 +283,7 @@
     "max_checks_per_day": 20,
     "recheck_minutes": 60,
     "refusal_fallback": true,
-    "news_entries_enabled": true,
+    "news_entries_enabled": false,
     "news_scan_minutes": 30,
     "news_min_confidence": 0.8,
     "news_min_technical_score": 4,
